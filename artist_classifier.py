@@ -5,14 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from dataset import get_dataset
+from dataset import get_painting_dataset
 from resnet_pytorch import ResNet
 # from ResNet import Bottleneck, ResNet, ResNet50
 
-dataset_tensor, classes = get_dataset(rescale_height=-1, rescale_width=-1, use_resized=True, save_pickle=False, load_pickle=True,
-                wordy=True)
+dataset_tensor, classes = get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1,
+                                               use_resized=True, save_pickle=False, load_pickle=True, wordy=True)
 
-print('x')
 train_size = int(0.7 * len(dataset_tensor))
 val_size = int(0.1 * len(dataset_tensor))
 test_size = len(dataset_tensor) - train_size - val_size
@@ -22,7 +21,7 @@ train, val, test = torch.utils.data.random_split(dataset_tensor, [train_size, va
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 kwargs = {'num_workers': 2, 'pin_memory': True} if torch.cuda.is_available() else {}
 
-trainloader = torch.utils.data.DataLoader(train, batch_size=64, shuffle=True, **kwargs)
+train_loader = torch.utils.data.DataLoader(train, batch_size=64, shuffle=True, **kwargs)
 
 net = ResNet.from_pretrained('resnet50', 50)
 print('res')
@@ -36,7 +35,7 @@ EPOCHS = 100
 for epoch in range(EPOCHS):
     losses = []
     running_loss = 0
-    for i, inp in enumerate(trainloader):
+    for i, inp in enumerate(train_loader):
         inputs, labels = inp
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
