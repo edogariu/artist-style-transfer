@@ -7,7 +7,6 @@ import torch.optim as optim
 
 from dataset import get_painting_dataset
 from resnet_pytorch import ResNet
-# from ResNet import Bottleneck, ResNet, ResNet50
 
 dataset_tensor, classes = get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1,
                                                use_resized=True, save_pickle=False, load_pickle=True, wordy=True)
@@ -23,15 +22,14 @@ kwargs = {'num_workers': 2, 'pin_memory': True} if torch.cuda.is_available() els
 
 train_loader = torch.utils.data.DataLoader(train, batch_size=64, shuffle=True, **kwargs)
 
-net = ResNet.from_pretrained('resnet50', 50)
-print('res')
-# net = ResNet50(50).to(device)
+net = ResNet.from_pretrained('resnet34', 50).to(device)
 
-criterion = nn.CrossEntropyLoss()
+criterion = nn.CrossEntropyLoss().to(device)
 optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.0001)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor = 0.1, patience=5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=5)
 
 EPOCHS = 100
+PRINT_EVERY = 1
 for epoch in range(EPOCHS):
     losses = []
     running_loss = 0
@@ -49,8 +47,8 @@ for epoch in range(EPOCHS):
 
         running_loss += loss.item()
 
-        if i % 1 == 0 and i > 0:
-            print(f'Loss [{epoch + 1}, {i}](epoch, minibatch): ', running_loss / 1)
+        if i % PRINT_EVERY == 0 and i > 0:
+            print(f'Loss [{epoch + 1}, {i}](epoch, minibatch): ', running_loss / PRINT_EVERY)
             running_loss = 0.0
 
     avg_loss = sum(losses) / len(losses)
