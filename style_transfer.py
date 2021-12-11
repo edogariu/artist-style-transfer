@@ -266,17 +266,17 @@ def train():
     # Optimizer settings
     optimizer = optim.Adam(transfer.parameters(), lr=LR)
 
-    # Loss trackers over each batch
-    batch_content_loss_sum = 0
-    batch_style_loss_sum = 0
-    batch_total_loss_sum = 0
-
     # Optimization/Training Loop
     batch_count = 1
     start = time.time()
     for epoch in range(NUM_EPOCHS):
         print("========Epoch {}/{}========".format(epoch + 1, NUM_EPOCHS))
         for content_batch, _ in content_loader:
+            # Loss trackers over each batch
+            batch_content_loss_sum = torch.tensor(0).to(device)
+            batch_style_loss_sum = torch.tensor(0).to(device)
+            batch_total_loss_sum = torch.tensor(0).to(device)
+
             # Get current batch size in case of odd batch sizes
             curr_batch_size = content_batch.shape[0]
 
@@ -303,11 +303,11 @@ def train():
                 s_loss = MSELoss(gram(value), style_gram[key][:curr_batch_size])
                 style_loss += s_loss
             style_loss *= STYLE_WEIGHT
-            batch_style_loss_sum += style_loss.item()
+            batch_style_loss_sum += style_loss
 
             # Total Loss
             total_loss = content_loss + style_loss
-            batch_total_loss_sum += total_loss.item()
+            batch_total_loss_sum += total_loss
 
             # Backprop and Weight Update
             total_loss.backward()
@@ -325,9 +325,9 @@ def train():
 
             batch_count += 1
 
-            print("\tContent Loss:\t{:.2f}".format(batch_content_loss_sum / batch_count))
-            print("\tStyle Loss:\t{:.2f}".format(batch_style_loss_sum / batch_count))
-            print("\tTotal Loss:\t{:.2f}\n".format(batch_total_loss_sum / batch_count))
+            print("\tContent Loss:\t{:.2f}".format(batch_content_loss_sum.item()))
+            print("\tStyle Loss:\t{:.2f}".format(batch_style_loss_sum.item()))
+            print("\tTotal Loss:\t{:.2f}\n".format(batch_total_loss_sum.item()))
 
         if epoch % MODEL_SAVE == 0:
             torch.save(transfer.state_dict(), 'models/transfer2_' + str(epoch) + '.pth')

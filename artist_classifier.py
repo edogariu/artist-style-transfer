@@ -8,7 +8,7 @@ import torch.optim as optim
 from dataset import get_painting_dataset
 from resnet_pytorch import ResNet
 
-dataset_tensor, classes = get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1,
+dataset_tensor = get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1,
                                                use_resized=True, save_pickle=False, load_pickle=True, wordy=True)
 
 train_size = int(0.7 * len(dataset_tensor))
@@ -22,7 +22,7 @@ kwargs = {'num_workers': 2, 'pin_memory': True} if torch.cuda.is_available() els
 
 train_loader = torch.utils.data.DataLoader(train, batch_size=64, shuffle=True, **kwargs)
 
-net = ResNet.from_pretrained('resnet34', 50).to(device)
+net = ResNet.from_pretrained('resnet18', 50).to(device)
 
 criterion = nn.CrossEntropyLoss().to(device)
 optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.0001)
@@ -39,6 +39,7 @@ for epoch in range(EPOCHS):
         optimizer.zero_grad()
 
         outputs = net(inputs)
+        print(outputs.size(), labels.size())
         loss = criterion(outputs, labels)
         losses.append(loss.item())
 
