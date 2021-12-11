@@ -79,11 +79,10 @@ def get_avg_dataset(rescale_height=-1, rescale_width=-1, wordy=False):
     for artist in dataset.keys():
         avg_img[artist] = np.zeros((target_height, target_width, 3), dtype=float)
         for i in range(len(dataset[artist])):
-            avg_img[artist] += rescale(dataset[artist][i], target_height=target_height, target_width=target_width) / len(dataset[artist])
-        avg_img[artist] = avg_img[artist].astype('uint8')
-
-        cv2.imshow(artist, avg_img[artist])
-        cv2.waitKey(0)
+            avg_img[artist] += rescale(dataset[artist][i], target_height=target_height,
+                                       target_width=target_width) / len(dataset[artist])
+        avg_img[artist] = torch.from_numpy(avg_img[artist].astype('uint8')
+                                           .transpose((2, 0, 1))).view(3, target_height, target_width)
 
 
     return avg_img
@@ -113,7 +112,7 @@ def get_content_dataset(size, rescale_height, rescale_width):
     return torch.utils.data.TensorDataset(in_tensors, out_tensors)
 
 
-# Script to load TensorDataset dataset of paintings (BGR, CxHxW, [0.0, 1.0]) with artist labels (from 0 to 49)
+# Script to load dataset of paintings (BGR, CxHxW, [0.0, 1.0]) with artist labels (from 0 to 49)
 def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
                          save_pickle=False, load_pickle=True, wordy=False):
     df = pandas.read_csv(ARCHIVE_DIR + 'artists.csv')
@@ -192,22 +191,31 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
     target_height, target_width = get_rescale_dims(dataset, total_paintings,
                                                    rescale_height=rescale_height, rescale_width=rescale_width)
 
-    # Convert to TensorDataset for use with PyTorch by switching (HxWxC) -> (CxHxW)
-    images = []
-    labels = []
-    for i in range(len(names)):
-        for im in dataset[names[i]]:
-            images.append(rescale(im, target_height=target_height, target_width=target_width).transpose((1, 2, 0)))
-            labels.append(i)
-
-    in_tensors = torch.from_numpy(np.array(images)).view(-1, 3, target_height, target_width)
     if for_classifier:
+        # Convert to TensorDataset for use with PyTorch classifier by switching (HxWxC) -> (CxHxW)
+        images = []
+        labels = []
+        for i in range(len(names)):
+            for im in dataset[names[i]]:
+                images.append(rescale(im, target_height=target_height, target_width=target_width).transpose((1, 2, 0)))
+                labels.append(i)
+
+        in_tensors = torch.from_numpy(np.asarray(images)).view(-1, 3, target_height, target_width)
         for i in range(len(in_tensors)):
             in_tensors[i] = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(in_tensors[i])
-    out_tensors = torch.from_numpy(np.array(labels)).view(-1)
+        out_tensors = torch.from_numpy(np.asarray(labels)).view(-1)
 
-    return torch.utils.data.TensorDataset(in_tensors, out_tensors)
+        return torch.utils.data.TensorDataset(in_tensors, out_tensors)
+    else:
+        # Convert to dict of tensor images for use with style transfer network by switching (HxWxC) -> (CxHxW)
+        for artist in names:
+            for i in range(len(dataset[artist])):
+                im = rescale(dataset[artist][i],
+                             target_height=target_height, target_width=target_width).transpose((2, 0, 1))
+                dataset[artist][i] = torch.from_numpy(im).view(3, target_height, target_width)
+        return dataset
 
 
 if __name__ == '__main__':
-    get_avg_dataset(rescale_height=-1, rescale_width=-1, wordy=True)
+    get_painting_dataset(for_classifier=False, rescale_height=-1, rescale_width=-1, use_resized=True,
+                         save_pickle=False, load_pickle=True, wordy=True)

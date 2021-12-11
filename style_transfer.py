@@ -1,14 +1,14 @@
 import numpy as np
-import cv2
+# import cv2
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import torchvision.models as models
-import torchvision.transforms as transforms
+# import torchvision.transforms as transforms
 import random
 import time
-from dataset import get_content_dataset
+from dataset import get_content_dataset, get_painting_dataset, get_avg_dataset
 
 # Acknowledgements:
 # Much of this code (residual transfer network, dealing with the pre-trained VGG and crafting the content and first
@@ -20,12 +20,16 @@ from dataset import get_content_dataset
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 kwargs = {'num_workers': 2, 'pin_memory': True} if torch.cuda.is_available() else {}
 
-TRAIN_SIZE = 224 if torch.cuda.is_available() else 128  # use small size if no gpu
+TRAIN_SIZE = 256 if torch.cuda.is_available() else 256  # use small size if no gpu
 
-NUM_EPOCHS = 360
-STYLE_IMAGE_PATH = "Pablo_Picasso_19.jpg"
-BATCH_SIZE = 4
-CONTENT_DATA_SIZE = 64
+# Can be 'random', 'average', 'cycle', or 'classifier'
+STYLE_METHOD = 'cycle'
+ARTIST = 'Albrecht_Dürer'  # 'Albrecht_Dürer'
+
+NUM_EPOCHS = 512
+# STYLE_IMAGE_PATH = "Pablo_Picasso_19.jpg"
+BATCH_SIZE = 4 if torch.cuda.is_available() else 1
+CONTENT_DATA_SIZE = 1
 CONTENT_WEIGHT = 17  # 17
 STYLE_WEIGHT = 50  # 25
 LR = 0.0012
@@ -49,6 +53,8 @@ class StyleTransfer(nn.Module):
             ConvLayer(32, 64, 3, 2),
             nn.ReLU(),
             ConvLayer(64, 128, 3, 2),
+            nn.ReLU(),
+            ConvLayer(128, 128, 1, 1),  # ADDED CONV LAYER WITH 1 x 1 KERNEL
             nn.ReLU()
         )
         self.ResidualBlock = nn.Sequential(
@@ -59,6 +65,8 @@ class StyleTransfer(nn.Module):
             ResidualLayer(128, 3)
         )
         self.DeconvBlock = nn.Sequential(
+            DeconvLayer(128, 128, 1, 1, 0),  # ADDED CONV LAYER WITH 1 x 1 KERNEL
+            nn.ReLU(),
             DeconvLayer(128, 64, 3, 2, 1),
             nn.ReLU(),
             DeconvLayer(64, 32, 3, 2, 1),
@@ -76,9 +84,12 @@ class StyleTransfer(nn.Module):
 class ConvLayer(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, norm="instance"):
         super(ConvLayer, self).__init__()
-        # Padding Layers
-        padding_size = kernel_size // 2
-        self.reflection_pad = nn.ReflectionPad2d(padding_size)
+        if kernel_size > 1:
+            # Padding Layers
+            padding_size = kernel_size // 2
+            self.reflection_pad = nn.ReflectionPad2d(padding_size)
+        else:
+            self.reflection_pad = nn.Identity()
 
         # Convolution Layer
         self.conv_layer = nn.Conv2d(in_channels, out_channels, kernel_size, stride)
@@ -205,33 +216,33 @@ def imshow(img, title=None):
     plt.pause(0.001)
 
 
-# DELETE THIS!!!
-# Preprocessing ~ Image to Tensor
-def itot(img, max_size=None):
-    # Rescale the image
-    if max_size is None:
-        itot_t = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize(TRAIN_SIZE),
-            transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.mul(255))
-        ])
-    else:
-        H, W, C = img.shape
-        image_size = tuple([int((float(max_size) / max([H, W])) * x) for x in [H, W]])
-        itot_t = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.mul(255))
-        ])
-
-    # Convert image to tensor
-    tensor = itot_t(img)
-
-    # Add the batch_size dimension
-    tensor = tensor.unsqueeze(dim=0)
-    return tensor
+# # DELETE THIS!!!
+# # Preprocessing ~ Image to Tensor
+# def itot(img, max_size=None):
+#     # Rescale the image
+#     if max_size is None:
+#         itot_t = transforms.Compose([
+#             transforms.ToPILImage(),
+#             transforms.Resize(TRAIN_SIZE),
+#             transforms.ToTensor(),
+#             transforms.Lambda(lambda x: x.mul(255))
+#         ])
+#     else:
+#         H, W, C = img.shape
+#         image_size = tuple([int((float(max_size) / max([H, W])) * x) for x in [H, W]])
+#         itot_t = transforms.Compose([
+#             transforms.ToPILImage(),
+#             transforms.Resize(image_size),
+#             transforms.ToTensor(),
+#             transforms.Lambda(lambda x: x.mul(255))
+#         ])
+#
+#     # Convert image to tensor
+#     tensor = itot_t(img)
+#
+#     # Add the batch_size dimension
+#     tensor = tensor.unsqueeze(dim=0)
+#     return tensor
 
 # ------------------------------------------------------------------------------------------------------------------
 
@@ -255,27 +266,52 @@ def train():
     imagenet_neg_mean = torch.tensor([-103.939, -116.779, -123.68], dtype=torch.float32).reshape(1, 3, 1, 1).to(device)
     imagenet_pos_mean = torch.tensor([103.939, 116.779, 123.68], dtype=torch.float32).reshape(1, 3, 1, 1).to(device)
 
-    style_image = cv2.imread(STYLE_IMAGE_PATH)
-    style_tensor = itot(style_image).double().to(device).add(imagenet_neg_mean)
-    b, c, h, w = style_tensor.shape
-    style_features = VGG(style_tensor.expand([BATCH_SIZE, c, h, w]))
-    style_gram = {}
-    for key, value in style_features.items():
-        style_gram[key] = gram(value)
+    # style_image = cv2.imread(STYLE_IMAGE_PATH)
+    # style_tensor = itot(style_image).double().to(device).add(imagenet_neg_mean)
+    if STYLE_METHOD == 'random':
+        style_dataset = get_painting_dataset(for_classifier=False, rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE,
+                                             use_resized=True, save_pickle=False, load_pickle=True, wordy=True)
+        style_tensor = style_dataset[ARTIST][random.randint(0, len(style_dataset[ARTIST]) - 1)]\
+            .double().to(device).add(imagenet_neg_mean)
+        b, c, h, w = style_tensor.shape
+        style_features = VGG(style_tensor.expand([BATCH_SIZE, c, h, w]))
+        style_gram = {}
+        for key, value in style_features.items():
+            style_gram[key] = gram(value)
+    elif STYLE_METHOD == 'average':
+        style_dataset = get_avg_dataset(rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE, wordy=True)
+        style_tensor = style_dataset[ARTIST].double().to(device).add(imagenet_neg_mean)
+        b, c, h, w = style_tensor.shape
+        style_features = VGG(style_tensor.expand([BATCH_SIZE, c, h, w]))
+        style_gram = {}
+        for key, value in style_features.items():
+            style_gram[key] = gram(value)
+    elif STYLE_METHOD == 'cycle':
+        style_dataset = get_painting_dataset(for_classifier=False, rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE,
+                                             use_resized=True, save_pickle=False, load_pickle=True, wordy=True)
+        style_gram_cycle = []
+        for t in style_dataset[ARTIST]:
+            style_tensor = t.double().to(device).add(imagenet_neg_mean)
+            b, c, h, w = style_tensor.shape
+            style_features = VGG(style_tensor.expand([BATCH_SIZE, c, h, w]))
+            style_gram = {}
+            for key, value in style_features.items():
+                style_gram[key] = gram(value)
+            style_gram_cycle.append(style_gram)
 
     # Optimizer settings
-    optimizer = optim.Adam(transfer.parameters(), lr=LR)
+    optimizer = optim.Adam(transfer.parameters(), lr=LR, weight_decay=0.0001)
 
     # Optimization/Training Loop
-    batch_count = 1
+    batch_count = 0
     start = time.time()
     for epoch in range(NUM_EPOCHS):
         print("========Epoch {}/{}========".format(epoch + 1, NUM_EPOCHS))
         for content_batch, _ in content_loader:
             # Loss trackers over each batch
-            batch_content_loss_sum = torch.tensor(0).to(device)
-            batch_style_loss_sum = torch.tensor(0).to(device)
-            batch_total_loss_sum = torch.tensor(0).to(device)
+            batch_content_loss_sum = torch.tensor(0, dtype=torch.float32).to(device)
+            batch_style_loss_sum = torch.tensor(0, dtype=torch.float32).to(device)
+            batch_total_loss_sum = torch.tensor(0, dtype=torch.float32).to(device)
 
             # Get current batch size in case of odd batch sizes
             curr_batch_size = content_batch.shape[0]
@@ -298,6 +334,10 @@ def train():
             content_loss *= CONTENT_WEIGHT
             batch_content_loss_sum += content_loss
 
+            if STYLE_METHOD == 'cycle':
+                index = batch_count % len(style_dataset[ARTIST])
+                style_tensor = style_dataset[ARTIST][index].double().to(device).add(imagenet_neg_mean)
+                style_gram = style_gram_cycle[index]
             style_loss = 0
             for key, value in generated_features.items():
                 s_loss = MSELoss(gram(value), style_gram[key][:curr_batch_size])
@@ -313,7 +353,7 @@ def train():
             total_loss.backward()
             optimizer.step()
 
-            if (batch_count - 1) % (BATCH_SIZE * 2) == 0:
+            if batch_count % 1 == 0:
                 plt.close('all')
                 fig = plt.figure(figsize=(7, 3))
                 fig.add_subplot(1, 3, 1)
