@@ -1,11 +1,9 @@
 import numpy as np
-# import cv2
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import torchvision.models as models
-# import torchvision.transforms as transforms
 import random
 import time
 from dataset import get_content_dataset, get_painting_dataset, get_avg_dataset
@@ -18,28 +16,22 @@ from dataset import get_content_dataset, get_painting_dataset, get_avg_dataset
 # ------------------------------------------------------------------------------------------------------------------
 # HYPERPARAMETERS
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-kwargs = {'num_workers': 2, 'pin_memory': True} if torch.cuda.is_available() else {}
+kwargs = {'num_workers': 4, 'pin_memory': True} if torch.cuda.is_available() else {}
 
-TRAIN_SIZE = 256 if torch.cuda.is_available() else 256  # use small size if no gpu
+TRAIN_SIZE = 224 if torch.cuda.is_available() else 128  # use small size if no gpu
 
 # Can be 'random', 'average', 'cycle', or 'classifier'
-STYLE_METHOD = 'cycle'
-ARTIST = 'Albrecht_Dürer'  # 'Albrecht_Dürer'
+STYLE_METHOD = 'random'
+ARTIST = 'Jackson_Pollock'  # 'Albrecht_Dürer'
 
-NUM_EPOCHS = 512
-# STYLE_IMAGE_PATH = "Pablo_Picasso_19.jpg"
+NUM_EPOCHS = 200
 BATCH_SIZE = 4 if torch.cuda.is_available() else 1
-CONTENT_DATA_SIZE = 1
+CONTENT_DATA_SIZE = 256
 CONTENT_WEIGHT = 17  # 17
 STYLE_WEIGHT = 50  # 25
-LR = 0.0012
+LR = 0.0024
 SEED = 0
-MODEL_SAVE = 40  # How often to save model during training in epochs
-
-# ADJUST VGG16 LAYERS TO MATCH THESE!!!
-# desired depth layers to compute content/style losses :
-content_layers_default = ['conv_4']
-style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
+SAVE_EVERY = 10  # How often to save model during training in epochs
 
 
 # -------------------------------------------------------------------------------------------------------------------
@@ -164,9 +156,9 @@ class VGG16(nn.Module):
     def __init__(self, vgg_path="models/vgg16-00b39a1b.pth"):
         super(VGG16, self).__init__()
         # Load VGG Skeleton, Pretrained Weights
-        vgg16_features = models.vgg16(pretrained=False)
-        vgg16_features.load_state_dict(torch.load(vgg_path), strict=False)
-        self.features = vgg16_features.features
+        vgg16 = models.vgg16(pretrained=False)
+        vgg16.load_state_dict(torch.load(vgg_path), strict=False)
+        self.features = vgg16.features
 
         # Turn-off Gradient History
         for param in self.features.parameters():
@@ -216,36 +208,7 @@ def imshow(img, title=None):
     plt.pause(0.001)
 
 
-# # DELETE THIS!!!
-# # Preprocessing ~ Image to Tensor
-# def itot(img, max_size=None):
-#     # Rescale the image
-#     if max_size is None:
-#         itot_t = transforms.Compose([
-#             transforms.ToPILImage(),
-#             transforms.Resize(TRAIN_SIZE),
-#             transforms.ToTensor(),
-#             transforms.Lambda(lambda x: x.mul(255))
-#         ])
-#     else:
-#         H, W, C = img.shape
-#         image_size = tuple([int((float(max_size) / max([H, W])) * x) for x in [H, W]])
-#         itot_t = transforms.Compose([
-#             transforms.ToPILImage(),
-#             transforms.Resize(image_size),
-#             transforms.ToTensor(),
-#             transforms.Lambda(lambda x: x.mul(255))
-#         ])
-#
-#     # Convert image to tensor
-#     tensor = itot_t(img)
-#
-#     # Add the batch_size dimension
-#     tensor = tensor.unsqueeze(dim=0)
-#     return tensor
-
 # ------------------------------------------------------------------------------------------------------------------
-
 
 def train():
     # Set random seeds for reproducibility
@@ -266,12 +229,10 @@ def train():
     imagenet_neg_mean = torch.tensor([-103.939, -116.779, -123.68], dtype=torch.float32).reshape(1, 3, 1, 1).to(device)
     imagenet_pos_mean = torch.tensor([103.939, 116.779, 123.68], dtype=torch.float32).reshape(1, 3, 1, 1).to(device)
 
-    # style_image = cv2.imread(STYLE_IMAGE_PATH)
-    # style_tensor = itot(style_image).double().to(device).add(imagenet_neg_mean)
     if STYLE_METHOD == 'random':
         style_dataset = get_painting_dataset(for_classifier=False, rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE,
                                              use_resized=True, save_pickle=False, load_pickle=True, wordy=True)
-        style_tensor = style_dataset[ARTIST][random.randint(0, len(style_dataset[ARTIST]) - 1)]\
+        style_tensor = style_dataset[ARTIST][random.randint(0, len(style_dataset[ARTIST]) - 1)] \
             .double().to(device).add(imagenet_neg_mean)
         b, c, h, w = style_tensor.shape
         style_features = VGG(style_tensor.expand([BATCH_SIZE, c, h, w]))
@@ -301,20 +262,21 @@ def train():
 
     # Optimizer settings
     optimizer = optim.Adam(transfer.parameters(), lr=LR, weight_decay=0.0001)
+    MSELoss = nn.MSELoss().to(device)
 
     # Optimization/Training Loop
     batch_count = 0
+    save_dir_prefix = 'models/' + ARTIST + '/' + STYLE_METHOD + '/' + 'transfer_' + str(CONTENT_WEIGHT) + '-' + \
+                      str(STYLE_WEIGHT)
+    print('Training!')
     start = time.time()
     for epoch in range(NUM_EPOCHS):
         print("========Epoch {}/{}========".format(epoch + 1, NUM_EPOCHS))
         for content_batch, _ in content_loader:
             # Loss trackers over each batch
-            batch_content_loss_sum = torch.tensor(0, dtype=torch.float32).to(device)
-            batch_style_loss_sum = torch.tensor(0, dtype=torch.float32).to(device)
-            batch_total_loss_sum = torch.tensor(0, dtype=torch.float32).to(device)
-
-            # Get current batch size in case of odd batch sizes
-            curr_batch_size = content_batch.shape[0]
+            batch_content_loss_sum = torch.tensor(0, dtype=torch.float32, device=device)
+            batch_style_loss_sum = torch.tensor(0, dtype=torch.float32, device=device)
+            batch_total_loss_sum = torch.tensor(0, dtype=torch.float32, device=device)
 
             # Free-up unneeded cuda memory
             torch.cuda.empty_cache()
@@ -329,18 +291,17 @@ def train():
             generated_features = VGG(generated_batch.add(imagenet_neg_mean))
 
             # Content Loss and Style Loss
-            MSELoss = nn.MSELoss().to(device)
             content_loss = MSELoss(generated_features['relu2_2'], content_features['relu2_2'])
             content_loss *= CONTENT_WEIGHT
             batch_content_loss_sum += content_loss
 
             if STYLE_METHOD == 'cycle':
                 index = batch_count % len(style_dataset[ARTIST])
-                style_tensor = style_dataset[ARTIST][index].double().to(device).add(imagenet_neg_mean)
+                # style_tensor = style_dataset[ARTIST][index].double().to(device).add(imagenet_neg_mean)
                 style_gram = style_gram_cycle[index]
             style_loss = 0
             for key, value in generated_features.items():
-                s_loss = MSELoss(gram(value), style_gram[key][:curr_batch_size])
+                s_loss = MSELoss(gram(value), style_gram[key])
                 style_loss += s_loss
             style_loss *= STYLE_WEIGHT
             batch_style_loss_sum += style_loss
@@ -362,20 +323,35 @@ def train():
                 imshow(to_image(style_tensor.add(imagenet_pos_mean)), title='Epoch {}: Style'.format(epoch + 1))
                 fig.add_subplot(1, 3, 3)
                 imshow(to_image(generated_batch[0]), title='Epoch {}: Transformed'.format(epoch + 1))
+                plt.show()
 
             batch_count += 1
 
-            print("\tContent Loss:\t{:.2f}".format(batch_content_loss_sum.item()))
-            print("\tStyle Loss:\t{:.2f}".format(batch_style_loss_sum.item()))
-            print("\tTotal Loss:\t{:.2f}\n".format(batch_total_loss_sum.item()))
+            # print("\tContent Loss:\t{:.2f}".format(batch_content_loss_sum.item()))
+            # print("\tStyle Loss:\t{:.2f}".format(batch_style_loss_sum.item()))
+            # print("\tTotal Loss:\t{:.2f}\n".format(batch_total_loss_sum.item()))
 
-        if epoch % MODEL_SAVE == 0:
-            torch.save(transfer.state_dict(), 'models/transfer2_' + str(epoch) + '.pth')
+            # Clean created tensors
+            del batch_content_loss_sum
+            del batch_style_loss_sum
+            del batch_total_loss_sum
+            del content_batch
+            del generated_batch
+            del content_features
+            del generated_features
+            if STYLE_METHOD == 'cycle':
+                del style_gram
+            del content_loss
+            del style_loss
+            del total_loss
+
+        if epoch % SAVE_EVERY == 0:
+            torch.save(transfer.state_dict(), save_dir_prefix + '_' + str(epoch) + '.pth')
 
     print('\n\nTRAINED IN {:.2f} SEC'.format(time.time() - start))
     transfer.eval()
     transfer.cpu()
-    torch.save(transfer.state_dict(), 'models/transfer2.pth')
+    torch.save(transfer.state_dict(), save_dir_prefix + '_final.pth')
 
 
 if __name__ == '__main__':

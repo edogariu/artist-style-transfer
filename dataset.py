@@ -176,33 +176,48 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
     else:
         # LOAD
         dataset = {}
-        for file in os.listdir(DICT_SAVE_DIR):
-            if for_classifier:
-                if file.__contains__('full_float'):
-                    with open(DICT_SAVE_DIR + file, 'rb') as f:
-                        dataset.update(pickle.load(f))
-            else:
+        if for_classifier:
+            in_data = np.load(DICT_SAVE_DIR + 'in_tensors.npz')['arr_0']
+            n, c, h, w = in_data.shape
+            in_tensors = torch.from_numpy(in_data).view(-1, 3, h, w)
+            out_tensors = torch.from_numpy(np.load(DICT_SAVE_DIR + 'out_tensors.npz')['arr_0']).view(-1)
+            if wordy:
+                print('Loaded!')
+            return torch.utils.data.TensorDataset(in_tensors, out_tensors)
+            # for file in os.listdir(DICT_SAVE_DIR):
+            #     if file.__contains__('full_float'):
+            #         with open(DICT_SAVE_DIR + file, 'rb') as f:
+            #             dataset.update(pickle.load(f))
+        else:
+            for file in os.listdir(DICT_SAVE_DIR):
                 if file.__contains__('full_int'):
                     with open(DICT_SAVE_DIR + file, 'rb') as f:
                         dataset.update(pickle.load(f))
         if wordy:
             print('Loaded!')
 
+    total_paintings = sum(len(dataset[key]) for key in dataset.keys())
     target_height, target_width = get_rescale_dims(dataset, total_paintings,
                                                    rescale_height=rescale_height, rescale_width=rescale_width)
 
     if for_classifier:
         # Convert to TensorDataset for use with PyTorch classifier by switching (HxWxC) -> (CxHxW)
-        images = []
+        images = np.zeros((total_paintings, 3, target_height, target_width), dtype=float)
         labels = []
+        count = 0
         for i in range(len(names)):
             for im in dataset[names[i]]:
-                images.append(rescale(im, target_height=target_height, target_width=target_width).transpose((1, 2, 0)))
+                images[count, :, :, :] = rescale(im, target_height=target_height, target_width=target_width)\
+                    .transpose((2, 0, 1))
                 labels.append(i)
+                count += 1
 
-        in_tensors = torch.from_numpy(np.asarray(images)).view(-1, 3, target_height, target_width)
+        in_tensors = torch.from_numpy(images).view(-1, 3, target_height, target_width)
+        if wordy:
+            print('Normalizing!')
         for i in range(len(in_tensors)):
             in_tensors[i] = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(in_tensors[i])
+
         out_tensors = torch.from_numpy(np.asarray(labels)).view(-1)
 
         return torch.utils.data.TensorDataset(in_tensors, out_tensors)
@@ -217,5 +232,5 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
 
 
 if __name__ == '__main__':
-    get_painting_dataset(for_classifier=False, rescale_height=-1, rescale_width=-1, use_resized=True,
+    get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
                          save_pickle=False, load_pickle=True, wordy=True)
