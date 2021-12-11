@@ -313,12 +313,12 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
     if for_classifier:
         for i in range(len(in_tensors)):
             in_tensors[i] = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(in_tensors[i])
-    out_tensors = torch.from_numpy(np.array(labels)).view(-1, 1)
+    out_tensors = torch.from_numpy(np.array(labels)).view(-1)
 
     return torch.utils.data.TensorDataset(in_tensors, out_tensors)
 
 
 if __name__ == '__main__':
     get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
-                         save_pickle=False, load_pickle=True,
+                         save_pickle=True, load_pickle=False,
                          wordy=True)

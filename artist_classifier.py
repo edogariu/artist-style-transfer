@@ -20,8 +20,6 @@ train, val, test = torch.utils.data.random_split(dataset_tensor, [train_size, va
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 kwargs = {'num_workers': 2, 'pin_memory': True} if torch.cuda.is_available() else {}
 
-train_loader = torch.utils.data.DataLoader(train, batch_size=64, shuffle=True, **kwargs)
-
 net = ResNet.from_pretrained('resnet18', 50).to(device)
 
 criterion = nn.CrossEntropyLoss().to(device)
@@ -29,7 +27,10 @@ optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.000
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=5)
 
 EPOCHS = 100
+BATCH_SIZE = 16
 PRINT_EVERY = 1
+
+train_loader = torch.utils.data.DataLoader(train, batch_size=BATCH_SIZE, shuffle=True, **kwargs)
 for epoch in range(EPOCHS):
     losses = []
     running_loss = 0
@@ -39,7 +40,6 @@ for epoch in range(EPOCHS):
         optimizer.zero_grad()
 
         outputs = net(inputs)
-        print(outputs.size(), labels.size())
         loss = criterion(outputs, labels)
         losses.append(loss.item())
 
@@ -48,8 +48,8 @@ for epoch in range(EPOCHS):
 
         running_loss += loss.item()
 
-        if i % PRINT_EVERY == 0 and i > 0:
-            print(f'Loss [{epoch + 1}, {i}](epoch, minibatch): ', running_loss / PRINT_EVERY)
+        if i % PRINT_EVERY == 0:
+            print('Epoch: {}\tLoss={}\tminibatch: {}'.format(epoch + 1, running_loss / PRINT_EVERY, i))
             running_loss = 0.0
 
     avg_loss = sum(losses) / len(losses)
