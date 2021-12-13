@@ -84,7 +84,6 @@ def get_avg_dataset(rescale_height=-1, rescale_width=-1, wordy=False):
         avg_img[artist] = torch.from_numpy(avg_img[artist].astype('uint8')
                                            .transpose((2, 0, 1))).view(3, target_height, target_width)
 
-
     return avg_img
 
 
@@ -177,13 +176,14 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
         # LOAD
         dataset = {}
         if for_classifier:
-            in_data = np.load(DICT_SAVE_DIR + 'in_tensors.npz')['arr_0']
-            n, c, h, w = in_data.shape
-            in_tensors = torch.from_numpy(in_data).view(-1, 3, h, w)
-            out_tensors = torch.from_numpy(np.load(DICT_SAVE_DIR + 'out_tensors.npz')['arr_0']).view(-1)
+            in_tensors = np.load(DICT_SAVE_DIR + 'in_tensors.npz')['arr_0']
+            out_tensors = np.load(DICT_SAVE_DIR + 'out_tensors.npz')['arr_0']
+            # n, c, h, w = in_data.shape
+            # in_tensors = torch.from_numpy(in_tensors).view(-1, 3, h, w)
+            # out_tensors = torch.from_numpy(out_tensors).view(-1)
             if wordy:
                 print('Loaded!')
-            return torch.utils.data.TensorDataset(in_tensors, out_tensors)
+            return in_tensors, out_tensors
             # for file in os.listdir(DICT_SAVE_DIR):
             #     if file.__contains__('full_float'):
             #         with open(DICT_SAVE_DIR + file, 'rb') as f:
@@ -207,7 +207,7 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
         count = 0
         for i in range(len(names)):
             for im in dataset[names[i]]:
-                images[count, :, :, :] = rescale(im, target_height=target_height, target_width=target_width)\
+                images[count, :, :, :] = rescale(im, target_height=target_height, target_width=target_width) \
                     .transpose((2, 0, 1))
                 labels.append(i)
                 count += 1
@@ -232,5 +232,5 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
 
 
 if __name__ == '__main__':
-    get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
-                         save_pickle=False, load_pickle=True, wordy=True)
+    get_painting_dataset(for_classifier=False, rescale_height=-1, rescale_width=-1, use_resized=True,
+                         save_pickle=True, load_pickle=False, wordy=True)
