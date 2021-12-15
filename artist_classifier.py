@@ -1,25 +1,18 @@
-import random
-
-import fastai.vision.learner
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas
 import torch
-import torchvision
-import torchvision.transforms as transforms
 import torchvision.models as models
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import time
 
-from fastai.vision import *
-import fastai
-# from fastai.callbacks import *
-# from fastai.callbacks.hooks import *
-from PIL import *
-
 from dataset import get_painting_dataset
+
+# -------------------------------------------------------------------------------------------------------------------
+# THIS IS PRETTY MUCH A TEST FILE AT THIS POINT! :)
+# -------------------------------------------------------------------------------------------------------------------
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 kwargs = {'num_workers': 4, 'pin_memory': False} if torch.cuda.is_available() else {}
@@ -55,15 +48,9 @@ class CustomDataLoader:
     def __next__(self):
         if self.count < self.shape[0] // self.batch_size:
             self.count += 1
-            # return self.dataset[self.indices[self.batch_size * (self.count - 1): self.batch_size * self.count]]
-            # in_tensors = torch.gather(self.dataset[:][0], 0,
-            #                           self.indices[self.batch_size * (self.count - 1): self.batch_size * self.count])
-            # out_tensors = torch.gather(self.dataset[:][1], 0,
-            #                            self.indices[self.batch_size * (self.count - 1): self.batch_size * self.count])
             batch_indices = self.indices[self.batch_size * (self.count - 1): self.batch_size * self.count]
-            return torch.from_numpy(self.data_x[batch_indices]). \
-                       view(-1, self.shape[1], self.shape[2], self.shape[3]).to(device), \
-                   torch.from_numpy(self.data_y[batch_indices]).view(-1).to(device, dtype=torch.long)
+            return torch.from_numpy(self.data_x[batch_indices]).view(-1, self.shape[1], self.shape[2], self.shape[3]).\
+                to(device), torch.from_numpy(self.data_y[batch_indices]).view(-1).to(device, dtype=torch.long)
         else:
             raise StopIteration
 
@@ -102,9 +89,12 @@ def train_classifier(resnet_size=34):
     data_x, data_y = get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
                                           save_pickle=False, load_pickle=True, wordy=True)
     # data_x, data_y = np.ones((8000, 3, 256, 224)), np.ones(8000)
-    artists = ['Vincent_van_Gogh', 'Edgar_Degas', 'Pablo_Picasso', 'Pierre-Auguste_Renoir', 'Paul_Gauguin', 'Francisco_Goya',
-       'Rembrandt', 'Alfred_Sisley', 'Titian', 'Marc_Chagall', 'Rene_Magritte', 'Amedeo_Modigliani', 'Paul_Klee',
-       'Henri_Matisse', 'Andy_Warhol', 'Mikhail_Vrubel', 'Sandro_Botticelli', 'Leonardo_da_Vinci', 'Peter_Paul_Rubens']
+    artists = ['Vincent_van_Gogh', 'Edgar_Degas', 'Pablo_Picasso', 'Pierre-Auguste_Renoir', 'Paul_Gauguin',
+               'Francisco_Goya',
+               'Rembrandt', 'Alfred_Sisley', 'Titian', 'Marc_Chagall', 'Rene_Magritte', 'Amedeo_Modigliani',
+               'Paul_Klee',
+               'Henri_Matisse', 'Andy_Warhol', 'Mikhail_Vrubel', 'Sandro_Botticelli', 'Leonardo_da_Vinci',
+               'Peter_Paul_Rubens']
 
     # Replace spaces with _
     df = pandas.read_csv('images/archive/artists.csv')
@@ -119,7 +109,7 @@ def train_classifier(resnet_size=34):
         name = names[int(data_y[i])]
         try:
             index = artists.index(name)
-        except ValueError as e:
+        except ValueError:
             continue
         in_tensors.append(torch.from_numpy(data_x[i]).unsqueeze(0))
         out_tensors.append(index)
@@ -138,11 +128,6 @@ def train_classifier(resnet_size=34):
     print('Acc = {}', round(100 * num_correct / len(out_tensors), 2))
 
     return 0
-
-
-
-
-
 
     criterion = nn.CrossEntropyLoss().to(device)
     # optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.0001)
@@ -166,8 +151,7 @@ def train_classifier(resnet_size=34):
     random_indices = np.arange(0, length)
     np.random.shuffle(random_indices)
     print('Splitting dataset: we have {} training datapoints!'.format(train_size))
-    train_x, train_y = data_x[random_indices[0:train_size]], \
-                       data_y[random_indices[0:train_size]]
+    train_x, train_y = data_x[random_indices[0:train_size]], data_y[random_indices[0:train_size]]
     val_x, val_y = data_x[random_indices[train_size:val_size + train_size]], \
                    data_y[random_indices[train_size:val_size + train_size]]
     test_x, test_y = data_x[random_indices[val_size + train_size:length]], \

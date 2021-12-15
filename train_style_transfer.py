@@ -63,7 +63,7 @@ class VGG16(nn.Module):
         if self.just_content:
             for name, layer in self.features._modules.items():
                 x = layer(x)
-                if name == 'relu2_2':
+                if int(name) == 8:
                     return x
         else:
             layers = {'3': 'relu1_2', '8': 'relu2_2', '15': 'relu3_3', '22': 'relu4_3'}
@@ -75,6 +75,42 @@ class VGG16(nn.Module):
                     if name == '22':
                         break
             return features
+
+
+# ------------------------------------------------------------------------------------------------------------------
+# CLASSES THAT MIGHT ALREADY EXIST BUT WE INEXPLICABLY NEEDED TO REWRITE TO GET CLASSIFIER WORKING
+# ------------------------------------------------------------------------------------------------------------------
+class Flatten(nn.Module):
+    def __init__(self):
+        super(Flatten, self).__init__()
+
+    def forward(self, x):
+        return x.view(x.size(0), -1)
+
+
+class AdaptiveConcatPool2d(nn.Module):
+    def __init__(self, size=None):
+        super(AdaptiveConcatPool2d, self).__init__()
+        sz = size or 1
+        self.ap = nn.AdaptiveAvgPool2d(sz)
+        self.mp = nn.AdaptiveMaxPool2d(sz)
+
+    def forward(self, x):
+        return torch.cat([self.mp(x), self.ap(x)], 1)
+
+
+class Normalize:
+    def __init__(self, mean, std, inplace=False, dtype=torch.float, dev=device):
+        self.mean = torch.as_tensor(mean, dtype=dtype, device=dev)[None, :, None, None]
+        self.std = torch.as_tensor(std, dtype=dtype, device=dev)[None, :, None, None]
+        self.inplace = inplace
+
+    def __call__(self, tensor):
+        if not self.inplace:
+            tensor = tensor.clone()
+
+        tensor.sub_(self.mean).div_(self.std)
+        return tensor
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -124,7 +160,7 @@ def imshow(img, title=None):
 # Trains with 'content_data_size / batch_size' batches per epoch for 'num_epochs' epochs, saves state dict every
 # 'save_every' epochs
 def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE,
-          content_data_size=CONTENT_DATA_SIZE, seed=SEED,
+          content_data_size=CONTENT_DATA_SIZE, seed=SEED, num_steps=2,
           content_weight=CONTENT_WEIGHT, style_weight=STYLE_WEIGHT, lr=LR, save_every=SAVE_EVERY):
     # Set random seeds for reproducibility
     torch.manual_seed(seed)
@@ -136,11 +172,32 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
     transfer = StyleTransfer().double().to(device)
     if style_method == 'classifier':
         VGG = VGG16(just_content=True).double().to(device)
-        # classifier =
+        classifier = models.resnet50(pretrained=False)
+        # Remove final layers and append the correct outputs
+        modules = list(classifier.children())
+        modules.pop(-1)
+        modules.pop(-1)
+        feature_layers = nn.Sequential(nn.Sequential(*modules))
+        feature_children = list(feature_layers.children())
+        # Append the layers we need (19 classes in this classifier)
+        feature_children.append(nn.Sequential(
+            AdaptiveConcatPool2d(), Flatten(), nn.BatchNorm1d(4096), nn.Dropout(p=0.375), nn.Linear(4096, 512),
+            nn.ReLU(), nn.BatchNorm1d(512), nn.Dropout(p=0.75), nn.Linear(512, 19)
+        ))
+        classifier = nn.Sequential(*feature_children)
+        sd = torch.load('models/best-2.pth')
+        classifier.load_state_dict(sd['model'], strict=True)
+        for param in classifier.parameters():
+            param.requires_grad = False
+        classifier = classifier.double().to(device)
+        classifier.eval()
     else:
         VGG = VGG16().double().to(device)
+    for param in VGG.parameters():
+        param.requires_grad = False
 
     imagenet_neg_mean = torch.tensor([-103.939, -116.779, -123.68], dtype=torch.float32).reshape(1, 3, 1, 1).to(device)
+    imagenet_pos_mean = torch.tensor([103.939, 116.779, 123.68], dtype=torch.float32).reshape(1, 3, 1, 1).to(device)
 
     # Content dataset
     print('Getting content dataset!')
@@ -167,9 +224,11 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
         for key, value in style_features.items():
             style_gram[key] = gram(value)
         if len(os.listdir('models/' + artist + '/' + style_method + '/')) == 0:
-            save_tensor_image('models/' + artist + '/' + style_method + '/style.jpg', style_tensor)
+            save_tensor_image('models/' + artist + '/' + style_method + '/style.jpg',
+                              style_tensor.add(imagenet_pos_mean))
         else:
-            save_tensor_image('models/' + artist + '/' + style_method + '/style2.jpg', style_tensor)
+            save_tensor_image('models/' + artist + '/' + style_method + '/style2.jpg',
+                              style_tensor.add(imagenet_pos_mean))
     elif style_method == 'average':
         style_dataset = get_avg_dataset(rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE, wordy=False)
         style_tensor = style_dataset[artist].double().to(device).add(imagenet_neg_mean)
@@ -178,22 +237,50 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
         style_gram = {}
         for key, value in style_features.items():
             style_gram[key] = gram(value)
-        save_tensor_image('models/' + artist + '/' + style_method + '/style.jpg', style_tensor)
+        save_tensor_image('models/' + artist + '/' + style_method + '/style.jpg', style_tensor.add(imagenet_pos_mean))
     elif style_method == 'cycle':
+        start = time.time()
         style_dataset = get_painting_dataset(for_classifier=False, rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE,
                                              use_resized=True, save_pickle=False, load_pickle=True, wordy=False)
         style_gram_cycle = []
-        for t in style_dataset[artist]:
-            style_tensor = t.double().to(device).add(imagenet_neg_mean)
+        length = len(style_dataset[artist])
+        for i in range(length):
+            style_tensor = style_dataset[artist][i].double().to(device).add(imagenet_neg_mean)
             b, c, h, w = style_tensor.shape
             style_features = VGG(style_tensor.expand([batch_size, c, h, w]))
             style_gram = {}
             for key, value in style_features.items():
-                style_gram[key] = gram(value)
+                style_gram[key] = gram(value).cpu()
             style_gram_cycle.append(style_gram)
+            if i % (length // 10) == 0:
+                print('{}%'.format(round(100 * i / length)))
+
+        print('Loaded in {} secs! :)'.format(round(time.time() - start, 2)))
+    elif style_method == 'smartaverage':
+        start = time.time()
+        style_dataset = get_painting_dataset(for_classifier=False, rescale_height=TRAIN_SIZE, rescale_width=TRAIN_SIZE,
+                                             use_resized=True, save_pickle=False, load_pickle=True, wordy=False)
+        length = len(style_dataset[artist])
+        style_gram = {}
+        initial_style_tensor = style_dataset[artist][0].double().to(device).add(imagenet_neg_mean)
+        b, c, h, w = initial_style_tensor.shape
+        for key, value in VGG(initial_style_tensor.expand([batch_size, c, h, w])).items():
+            style_gram[key] = value
+        for i in range(1, length):
+            style_tensor = style_dataset[artist][i].double().to(device).add(imagenet_neg_mean)
+            b, c, h, w = style_tensor.shape
+            style_features = VGG(style_tensor.expand([batch_size, c, h, w]))
+            for key, value in style_features.items():
+                style_gram[key] += value
+            if (i + 1) % (length // 10) == 0:
+                print('{}%'.format(round(100 * (i + 1) / length)))
+        for key, value in style_gram.items():
+            style_gram[key] = gram(value / length)
+        print('Loaded in {} secs! :)'.format(round(time.time() - start, 2)))
 
     # Optimizer and loss function settings
     optimizer = optim.Adam(transfer.parameters(), lr=lr, weight_decay=0.0001)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=num_epochs // num_steps, gamma=0.5)
     MSELoss = nn.MSELoss().to(device)
 
     # Optimization/Training Loop
@@ -201,27 +288,41 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
         method = 0
     elif style_method == 'average':
         method = 1
+    elif style_method == 'smartaverage':
+        method = 4
     elif style_method == 'cycle':
         method = 2
     elif style_method == 'classifier':
         method = 3
+        artists = ['Alfred_Sisley', 'Amedeo_Modigliani', 'Andy_Warhol', 'Edgar_Degas',
+                   'Francisco_Goya', 'Henri_Matisse', 'Leonardo_da_Vinci', 'Marc_Chagall',
+                   'Mikhail_Vrubel', 'Pablo_Picasso', 'Paul_Gauguin', 'Paul_Klee',
+                   'Peter_Paul_Rubens', 'Pierre-Auguste_Renoir', 'Rembrandt', 'Rene_Magritte',
+                   'Sandro_Botticelli', 'Titian', 'Vincent_van_Gogh']
+        index = artists.index(artist)
+        labels = torch.from_numpy(np.array([index for _ in range(batch_size)])). \
+            view(batch_size).to(device, dtype=torch.long)
+        print('Labels:\t', labels)
+        CrossEntropyLoss = nn.CrossEntropyLoss().to(device)
+        normalize = Normalize(mean=[0.485, 0.546, 0.406], std=[0.229, 0.224, 0.225], dev=device)
     else:
         print('enter valid style method!')
         return 0
+
     batch_count = 0
     print('Training!')
     start = time.time()
     epoch_start = start
+    losses = np.full((num_epochs, 3), -1, dtype=np.longdouble)  # Track content, style, and total losses per epoch
     for epoch in range(num_epochs):
-        print("========Epoch {}/{}========\tprev took {} secs".format(epoch + 1, num_epochs,
-                                                                      round(time.time() - epoch_start, 2)))
+        print(artist + ', ' + style_method + "\t========Epoch {}/{}========\tprev took {} secs".
+              format(epoch + 1, num_epochs, round(time.time() - epoch_start, 2)))
         epoch_start = time.time()
+        # Loss trackers over each batch
+        epoch_content_loss = torch.tensor(0, dtype=torch.float32, device=device)
+        epoch_style_loss = torch.tensor(0, dtype=torch.float32, device=device)
+        epoch_total_loss = torch.tensor(0, dtype=torch.float32, device=device)
         for content_batch, _ in content_loader:
-            # Loss trackers over each batch
-            batch_content_loss_sum = torch.tensor(0, dtype=torch.float32, device=device)
-            batch_style_loss_sum = torch.tensor(0, dtype=torch.float32, device=device)
-            batch_total_loss_sum = torch.tensor(0, dtype=torch.float32, device=device)
-
             # Free-up unneeded cuda memory
             torch.cuda.empty_cache()
 
@@ -240,10 +341,12 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
             else:
                 content_loss = MSELoss(generated_features['relu2_2'], content_features['relu2_2'])
             content_loss *= content_weight
-            batch_content_loss_sum += content_loss
+            epoch_content_loss += content_loss
 
             if method == 3:
-                print('u forgot to finihs hte classifier stuff mate')
+                normalized_generated_batch = normalize(torch.div(generated_batch[:, [2, 1, 0]], 255.0))
+                classification = classifier(normalized_generated_batch)
+                style_loss = CrossEntropyLoss(classification, labels)
             else:
                 if method == 2:
                     index = batch_count % len(style_dataset[artist])
@@ -252,14 +355,14 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
                         style_tensor = style_dataset[artist][index].double()
                 style_loss = 0
                 for key, value in generated_features.items():
-                    s_loss = MSELoss(gram(value), style_gram[key])
+                    s_loss = MSELoss(gram(value), style_gram[key].to(device))
                     style_loss += s_loss
             style_loss *= style_weight
-            batch_style_loss_sum += style_loss
+            epoch_style_loss += style_loss
 
             # Total Loss
             total_loss = content_loss + style_loss
-            batch_total_loss_sum += total_loss
+            epoch_total_loss += total_loss
 
             # Backprop and Weight Update
             total_loss.backward()
@@ -269,48 +372,54 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
             if batch_count % BATCH_INFO_EVERY == 0:
                 plt.close('all')
                 fig = plt.figure(figsize=(7, 3))
-                fig.add_subplot(1, 3, 1)
-                imshow(to_image(content_batch[0]), title='Epoch {}: Content'.format(epoch + 1))
-                fig.add_subplot(1, 3, 2)
-                imshow(to_image(style_tensor), title='Epoch {}: Style'.format(epoch + 1))
-                fig.add_subplot(1, 3, 3)
-                imshow(to_image(generated_batch[0]), title='Epoch {}: Transformed'.format(epoch + 1))
-                print("\tContent Loss:\t{:.2f}".format(batch_content_loss_sum.item()))
-                print("\tStyle Loss:\t{:.2f}".format(batch_style_loss_sum.item()))
-                print("\tTotal Loss:\t{:.2f}\n".format(batch_total_loss_sum.item()))
+                if method != 3 and method != 4:
+                    fig.add_subplot(1, 3, 1)
+                    imshow(to_image(content_batch[0]), title='Content')
+                    fig.add_subplot(1, 3, 2)
+                    if method == 2:
+                        imshow(to_image(style_tensor), title='Style')
+                    else:
+                        imshow(to_image(style_tensor.to(device).add(imagenet_pos_mean)), title='Style')
+                    fig.add_subplot(1, 3, 3)
+                    imshow(to_image(generated_batch[0]), title='Transformed')
+                else:
+                    fig.add_subplot(1, 2, 1)
+                    imshow(to_image(content_batch[0]), title='Epoch {}: Content'.format(epoch + 1))
+                    fig.add_subplot(1, 2, 2)
+                    imshow(to_image(generated_batch[0]), title='Epoch {}: Transformed'.format(epoch + 1))
+                print("\tContent Loss:\t{:.2f}".format(content_loss.item()))
+                print("\tStyle Loss:\t{:.2f}".format(style_loss.item()))
+                print("\tTotal Loss:\t{:.2f}\n".format(total_loss.item()))
 
             batch_count += 1
 
             # Clean created tensors
-            del batch_content_loss_sum
-            del batch_style_loss_sum
-            del batch_total_loss_sum
             del content_batch
             del generated_batch
             del content_features
             del generated_features
             if method == 2:
                 del style_gram
+            elif method == 3:
+                del normalized_generated_batch
+                del classification
             del content_loss
             del style_loss
             del total_loss
 
+        scheduler.step()
+        losses[epoch, 0] = epoch_content_loss.cpu().item()
+        losses[epoch, 1] = epoch_style_loss.cpu().item()
+        losses[epoch, 2] = epoch_total_loss.cpu().item()
+        del epoch_content_loss
+        del epoch_style_loss
+        del epoch_total_loss
+
         if epoch % save_every == 0:
             torch.save(transfer.state_dict(), save_dir_prefix + '_' + str(epoch) + '.pth')
+            np.save(save_dir_prefix + '_' + str(epoch) + '.npy', losses)
 
-    print('\n\nTRAINED IN {:.2f} SEC'.format(time.time() - start))
+    print('\n\nTRAINED IN {:.2f} SEC\n\n\n'.format(time.time() - start))
     transfer.eval()
     transfer.cpu()
     torch.save(transfer.state_dict(), save_dir_prefix + '_' + str(num_epochs) + '.pth')
-
-
-if __name__ == '__main__':
-
-    train(style_method='cycle', artist='Jackson_Pollock', num_epochs=33, batch_size=4, content_data_size=256, seed=56,
-          content_weight=17, style_weight=40, lr=0.0036, save_every=8)
-    train(style_method='cycle', artist='Pablo_Picasso', num_epochs=33, batch_size=4, content_data_size=256, seed=5,
-          content_weight=17, style_weight=40, lr=0.0036, save_every=8)
-    train(style_method='random', artist='Georges_Seurat', num_epochs=25, batch_size=4, content_data_size=256, seed=3,
-          content_weight=17, style_weight=50, lr=0.0048, save_every=8)
-    train(style_method='random', artist='Claude_Monet', num_epochs=25, batch_size=4, content_data_size=256, seed=4,
-          content_weight=17, style_weight=50, lr=0.0048, save_every=8)

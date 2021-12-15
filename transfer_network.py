@@ -117,6 +117,7 @@ class DeconvLayer(nn.Module):
             out = self.norm_layer(x)
         return out
 
+# THIS STUFF IS ORGANIZED MORE NICELY, BUT DOESN'T WORK WITH ALREADY-TRAINED MODELS
 # class StyleTransfer(nn.Module):
 #     def __init__(self):
 #         super(StyleTransfer, self).__init__()
@@ -147,7 +148,8 @@ class DeconvLayer(nn.Module):
 #         return out
 #
 #
-# # Implement reflection padding (before) and instance normalization (after) in addition to the normal convolutional layer
+# # Implement reflection padding (before) and instance normalization (after)
+# # in addition to the normal convolutional layer
 # class ConvLayer(nn.Module):
 #     def __init__(self, in_channels, out_channels, kernel_size, stride, use_relu=True, use_norm=True):
 #         super(ConvLayer, self).__init__()

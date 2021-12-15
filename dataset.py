@@ -7,7 +7,7 @@ import os
 import torchvision.transforms as transforms
 import random
 
-NUM_DICTS = 6
+NUM_DICTS = 6  # Number of dictionaries to split dataset into when pickling (too big for one file)
 DICT_SAVE_DIR = 'dicts/'
 ARCHIVE_DIR = 'images/archive/'
 CONTENT_DIR = 'images/content/'
@@ -98,7 +98,7 @@ def get_content_dataset(size, rescale_height, rescale_width):
         if im is None:
             continue
 
-        images[count, :, :, :] = rescale(im, target_height=rescale_height, target_width=rescale_width).astype(float)
+        images[count, :, :, :] = cv2.resize(im, (rescale_height, rescale_width)).astype(float)
 
         count += 1
         if count >= size:
@@ -111,7 +111,12 @@ def get_content_dataset(size, rescale_height, rescale_width):
     return torch.utils.data.TensorDataset(in_tensors, out_tensors)
 
 
-# Script to load dataset of paintings (BGR, CxHxW, [0.0, 1.0]) with artist labels (from 0 to 49)
+# Script to load dataset of paintings (BGR, CxHxW, [0.0, 1.0]) with artist labels (from 0 to 49) if for_classifier==True
+# If not, returns dictionary where artist is the key and the value is a list of all the paintings belonging to that
+# artist as BGR tensors of shape (C x H x W) with values from [0, 255].
+# Call with save_pickle=True and load_pickle=False to load from the datset directly, and call with load_pickle=True
+# to load from pre-saved dictionaries for faster loading
+# Rescales paintings to (rescale_height x rescale_width) if specified, rescales to average dimensions // 2 if not
 def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
                          save_pickle=False, load_pickle=True, wordy=False):
     df = pandas.read_csv(ARCHIVE_DIR + 'artists.csv')
@@ -178,16 +183,9 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
         if for_classifier:
             in_tensors = np.load(DICT_SAVE_DIR + 'in_tensors.npz')['arr_0']
             out_tensors = np.load(DICT_SAVE_DIR + 'out_tensors.npz')['arr_0']
-            # n, c, h, w = in_data.shape
-            # in_tensors = torch.from_numpy(in_tensors).view(-1, 3, h, w)
-            # out_tensors = torch.from_numpy(out_tensors).view(-1)
             if wordy:
                 print('Loaded!')
             return in_tensors, out_tensors
-            # for file in os.listdir(DICT_SAVE_DIR):
-            #     if file.__contains__('full_float'):
-            #         with open(DICT_SAVE_DIR + file, 'rb') as f:
-            #             dataset.update(pickle.load(f))
         else:
             for file in os.listdir(DICT_SAVE_DIR):
                 if file.__contains__('full_int'):
@@ -230,7 +228,3 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
                 dataset[artist][i] = torch.from_numpy(im).view(3, target_height, target_width)
         return dataset
 
-
-if __name__ == '__main__':
-    get_painting_dataset(for_classifier=False, rescale_height=-1, rescale_width=-1, use_resized=True,
-                         save_pickle=True, load_pickle=False, wordy=True)
