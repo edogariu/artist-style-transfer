@@ -2,7 +2,7 @@
 
 Learning the style of a whole artist instead of simply the style of a specified image :)
 
-How to set up:
+## How to set up:
   - Download /models/, /images/, and /dicts/ folders from ________, and place them in the repository folder.
   - Then run inference.py using images from /cuteimages/ or your own images by setting CONTENT_IMG to the filename and setting other parameters! 
   - To train a transfer model using one of the following approaches, use train_style_transfer.py
@@ -14,7 +14,7 @@ How to set up:
      
      
  
- ACKNOWLEDGEMENTS:
+## ACKNOWLEDGEMENTS:
   - Painting dataset gotten from the following Kaggle competiton:
         https://www.kaggle.com/ikarus777/best-artworks-of-all-time
   - Dataset of random images to use as arbitrary content images gotten from:
