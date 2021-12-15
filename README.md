@@ -7,8 +7,10 @@ How to set up:
   - Then run inference.py using images from /cuteimages/ or your own images by setting CONTENT_IMG to the filename and setting other parameters! 
   
   - To train a transfer model using one of the following approaches, use train_style_transfer.py
-     - 'average' (raw RGB pixel average across artist)    - 'smartaverage' (average style features across artist, extracted from VGG)     
-     - 'random' (random painting from artist)             - 'cycle' (cycle artist paintings during training)        
+     - 'average' (raw RGB pixel average across artist)    
+     - 'smartaverage' (average style features across artist, extracted from VGG)     
+     - 'random' (random painting from artist)             
+     - 'cycle' (cycle artist paintings during training)        
      - 'classifier' (backprop through pre-trained artist classfier)
      
      
