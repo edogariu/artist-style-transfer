@@ -14,7 +14,7 @@ Learning the style of a whole artist instead of simply the style of a specified 
      
      
  
-## ACKNOWLEDGEMENTS:
+## Acknowledgements:
   - Painting dataset gotten from the following Kaggle competiton:
         https://www.kaggle.com/ikarus777/best-artworks-of-all-time
   - Dataset of random images to use as arbitrary content images gotten from:
