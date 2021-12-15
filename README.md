@@ -29,4 +29,4 @@ Learning the style of a whole artist instead of simply the style of a specified 
   - Pre-trained ResNet-50 artist classfier state_dict gotten from the following Kaggle submission:
         - https://www.kaggle.com/attol8/paintings-classifier-fastai-resnet50-90-2-ac%20c/notebook
   - Love for computer vision gotten from:
-        - Prof. Olga Russakovsky's amazing teaching and passion! :)    (and Prof. Fei-Fei Li's pioneering of the field!)
+        - Prof. Olga Russakovsky's amazing teaching and passion! :)
