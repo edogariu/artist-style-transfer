@@ -16,17 +16,17 @@ Learning the style of a whole artist instead of simply the style of a specified 
  
 ## Acknowledgements:
   - Painting dataset gotten from the following Kaggle competiton:
-        https://www.kaggle.com/ikarus777/best-artworks-of-all-time
+        - https://www.kaggle.com/ikarus777/best-artworks-of-all-time
   - Dataset of random images to use as arbitrary content images gotten from:
-        https://github.com/fastai/imagenette
+        - https://github.com/fastai/imagenette
   - The baseline architecture is gotten from:
-        J. Johnson, A. Alahi, and L. Fei-Fei, “Perceptual losses for real-time style transfer and super-resolution,”
-        inComputer Vision – ECCV 2016, B. Leibe, J. Matas, N. Sebe, and M. Welling, Eds.Cham: Springer InternationalPublishing, 2016, pp. 694–711
+        - J. Johnson, A. Alahi, and L. Fei-Fei, “Perceptual losses for real-time style transfer and super-resolution,”
+          inComputer Vision – ECCV 2016, B. Leibe, J. Matas, N. Sebe, and M. Welling, Eds.Cham: Springer InternationalPublishing, 2016, pp. 694–711
   - Lots of code for the implementation of the baseline was adapted from:
-        R. Mina, “fast-neural-style: Fast style transfer in pytorch!” https://github.com/iamRusty/fast-neural-style-pytorch
+        - R. Mina, “fast-neural-style: Fast style transfer in pytorch!” https://github.com/iamRusty/fast-neural-style-pytorch
   - Pre-trained VGG feature extractor state_dict gotten from:
-        https://web.eecs.umich.edu/~justincj/models/vgg16-00b39a1b.pth
+        - https://web.eecs.umich.edu/~justincj/models/vgg16-00b39a1b.pth
   - Pre-trained ResNet-50 artist classfier state_dict gotten from the following Kaggle submission:
-        https://www.kaggle.com/attol8/paintings-classifier-fastai-resnet50-90-2-ac%20c/notebook
+        - https://www.kaggle.com/attol8/paintings-classifier-fastai-resnet50-90-2-ac%20c/notebook
   - Love for computer vision gotten from:
-        Prof. Olga Russakovsky! :)    (ooh and Prof. Fei Fei Li)
+        - Prof. Olga Russakovsky! :)    (ooh and Prof. Fei Fei Li)
