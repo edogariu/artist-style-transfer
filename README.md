@@ -23,7 +23,7 @@ Learning the style of a whole artist instead of simply the style of a specified 
         J. Johnson, A. Alahi, and L. Fei-Fei, “Perceptual losses for real-time style transfer and super-resolution,”
         inComputer Vision – ECCV 2016, B. Leibe, J. Matas, N. Sebe, and M. Welling, Eds.Cham: Springer InternationalPublishing, 2016, pp. 694–711
   - Lots of code for the implementation of the baseline was adapted from:
-        R. Mina, “fast-neural-style: Fast style transfer in pytorch!” https://github.com/iamRusty/fast-neural-style-pytorch,2018
+        R. Mina, “fast-neural-style: Fast style transfer in pytorch!” https://github.com/iamRusty/fast-neural-style-pytorch
   - Pre-trained VGG feature extractor state_dict gotten from:
         https://web.eecs.umich.edu/~justincj/models/vgg16-00b39a1b.pth
   - Pre-trained ResNet-50 artist classfier state_dict gotten from the following Kaggle submission:
