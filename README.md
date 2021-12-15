@@ -1,4 +1,4 @@
-# feifeifanclub - Neural Style Transfer with Learned Artist Representation!
+# Neural Style Transfer with Learned Artist Representation!
 
 Learning the style of a whole artist instead of simply the style of a specified image :)
 
