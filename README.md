@@ -3,7 +3,7 @@
 Learning the style of a whole artist instead of simply the style of a specified image :)
 
 ## How to set up:
-  - Download /models/, /images/, and /dicts/ folders from ________, and place them in the repository folder.
+  - Download /models/, /images/, and /dicts/ folders from https://drive.google.com/drive/folders/1O-GmpkyOs-x0I-Hg7zr8D6Vor1j6TAYr?usp=sharing, and place them in the repository folder.
   - Then run inference.py using images from /cuteimages/ or your own images by setting CONTENT_IMG to the filename and setting other parameters! 
   - To train a transfer model using one of the following approaches, use train_style_transfer.py
      - 'average' (raw RGB pixel average across artist)    
