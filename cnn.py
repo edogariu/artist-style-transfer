@@ -3,7 +3,7 @@ import torch.nn as nn
 
 # CNN architecture for network that learns "style", generating stylized version of input image.
 # Architecture pretty much copied from {Johnson/Fei Fei Li paper}, with some improvements (instance norm and
-# reflection pad) implemented as suggested by {Google paper?}
+# reflection pad) implemented as suggested by {Google paper?}.
 
 # Code itself was adapted from implementation in: https://github.com/rrmina/fast-neural-style-pytorch
 class StyleTransfer(nn.Module):

@@ -78,7 +78,7 @@ class VGG16(nn.Module):
 
 
 # ------------------------------------------------------------------------------------------------------------------
-# CLASSES THAT MIGHT ALREADY EXIST BUT WE INEXPLICABLY NEEDED TO REWRITE TO GET CLASSIFIER WORKING
+# CLASSES THAT MIGHT ALREADY EXIST BUT WE INEXPLICABLY NEEDED TO REWRITE TO GET CLASSIFIER WORKING.
 # ------------------------------------------------------------------------------------------------------------------
 class Flatten(nn.Module):
     def __init__(self):
