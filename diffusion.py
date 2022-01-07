@@ -216,16 +216,17 @@ class Diffusion:
                 x = torch.randn(batch_size, self.model.in_channels, self.model.resolution, self.model.resolution). \
                     to(self.device)
 
-            # Apply timestep rescaling if needed
+            # Apply timestep rescaling
+            indices = list(range(start_step - steps_to_do, start_step))
+            # Add progress bar if needed
+            if progress:
+                progress_bar = tqdm.tqdm
+                indices = progress_bar(reversed(indices), total=self.rescaled_num_steps)
+            else:
+                indices = reversed(indices)
+
             if not self.use_ddim:
-                indices = list(range(start_step - steps_to_do, start_step))
                 assert len(indices) == steps_to_do
-                # Add progress bar if needed
-                if progress:
-                    progress_bar = tqdm.tqdm
-                    indices = progress_bar(reversed(indices), total=self.rescaled_num_steps)
-                else:
-                    indices = reversed(indices)
                 for t in indices:
                     timestep = (t * torch.ones(batch_size)).to(self.device)
                     x, x_0 = denoising_step(x, t=timestep, timestep_map=self.timestep_map,
@@ -239,14 +240,7 @@ class Diffusion:
                                             posterior_mean_coef2=self.posterior_mean_coef2)
 
             else:  # APPLY DDIM
-                indices = list(range(start_step - steps_to_do, start_step))
                 assert len(indices) == self.rescaled_num_steps
-                # Add progress bar if needed
-                if progress:
-                    progress_bar = tqdm.tqdm
-                    indices = progress_bar(reversed(indices), total=self.rescaled_num_steps)
-                else:
-                    indices = reversed(indices)
                 for t in indices:
                     timestep = (t * torch.ones(batch_size)).to(self.device)
                     x, x_0 = ddim_denoising_step(x, t=timestep, timestep_map=self.timestep_map,
