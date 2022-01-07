@@ -9,7 +9,7 @@ import torchvision.models as models
 import random
 import time
 
-from transfer_network import StyleTransfer
+from cnn import StyleTransfer
 from dataset import get_content_dataset, get_painting_dataset, get_avg_dataset
 
 # Acknowledgements:
