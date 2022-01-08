@@ -1,8 +1,23 @@
 from abc import abstractmethod
+
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import math
+
+
+'''
+DIFFUSION MODEL BASED ON THE FOLLOWING PAPERS AND CORRESPONDING WORK:
+    - Ho et al. Denoising Diffusion Probabilistic Models (DDPM): https://arxiv.org/pdf/2006.11239.pdf
+    - Song et al. Denoising Diffusion Implicit Models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
+    - Dhariwal/Nichol Diffusion Model Beats GAN on Image Synthesis (OpenAI): https://arxiv.org/pdf/2105.05233.pdf
+    
+    Model architecture closely follows DDPM's and OpenAI's, implementation largely same with some modifications for 
+    clarity, convenience, and a different attention implementation. 
+    
+    I will also add classifier-dependent and classifier-free guidance as per Ho/Salismans
+    https://openreview.net/pdf/ea628d03c92a49b54bc2d757d209e024e7885980.pdf once I get around to it :)
+'''
 
 
 # Abstract wrapper class to be used when forward propagation needs step embeddings
@@ -14,11 +29,11 @@ class UsesSteps(nn.Module):
         """
 
 
-# Wrapper sequential class that knows when to pass time step embedding or not
 def override(a):  # silly function i had to write to use @override, sometimes python can be annoying lol
     return a
 
 
+# Wrapper sequential class that knows when to pass time step embedding to its children or not
 class UsesStepsSequential(nn.Sequential, UsesSteps):
     @override
     def forward(self, x, step):
@@ -30,8 +45,19 @@ class UsesStepsSequential(nn.Sequential, UsesSteps):
         return x
 
 
-# Reimplementation from Diffusion Models Beat GANs on Image Synthesis paper
 class Upsample(nn.Module):
+    """
+    Creates a module whose forward pass performs 2x upsampling of input image.
+
+        Parameters:
+            - in_channels (int): number of channels to pass in
+            - out_channels (int): number of channels to return. if None, return with in_channels channels
+            - with_conv (bool)L if True use Conv2D for upsampling, if False use nearest neighbor interpolation
+
+
+        Returns:
+            - An nn.Module to be used to compose a network.
+    """
     def __init__(self, in_channels, with_conv, out_channels=None):
         super(Upsample, self).__init__()
         self.with_conv = with_conv
@@ -39,7 +65,7 @@ class Upsample(nn.Module):
         if with_conv:
             self.conv = nn.Conv2d(in_channels=in_channels,
                                   out_channels=out_channels if out_channels is not None else in_channels,
-                                  kernel_size=(3, 3), stride=(1, 1), padding=1)
+                                  kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
 
     def forward(self, x):
         x = F.interpolate(x, scale_factor=2.0, mode='nearest')
@@ -49,6 +75,17 @@ class Upsample(nn.Module):
 
 
 class Downsample(nn.Module):
+    """
+    Creates a module whose forward pass performs 2x downsampling of input image.
+
+        Parameters:
+            - in_channels (int): number of channels to pass in
+            - out_channels (int): number of channels to return. if None, return with in_channels channels
+            - with_conv (bool): if True use Conv2D for downsampling, if False use 2D avg. pooling
+
+        Returns:
+            - An nn.Module to be used to compose a network.
+    """
     def __init__(self, in_channels, with_conv, out_channels=None):
         super(Downsample, self).__init__()
         self.with_conv = with_conv
@@ -56,7 +93,7 @@ class Downsample(nn.Module):
         if with_conv:
             self.conv = nn.Conv2d(in_channels=in_channels,
                                   out_channels=out_channels if out_channels is not None else in_channels,
-                                  kernel_size=(3, 3), stride=(2, 2), padding=1)  # ADD ASYMMETRIC PADDING??
+                                  kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))  # ADD ASYMMETRIC PADDING??
 
     def forward(self, x):
         if self.with_conv:
@@ -69,6 +106,24 @@ class Downsample(nn.Module):
 # Can be used with up or downsampling
 # If use_conv=True and out_channels!=None, use spatial convolution to change number of channels
 class ResidualBlock(UsesSteps):
+    """
+    Creates a residual block containing 2 convolutional layers with a skip connection.
+    Uses timestep embeddings and 2 layers of GroupNorm (32 groups).
+
+        Parameters:
+            - in_channels (int): number of channels to pass in
+            - out_channels (int): number of channels to return. if None, return with in_channels channels
+            - step_channels (int): number of channels to use for timestep embedding
+            - upsample (bool): whether to upsample before first convolution
+            - downsample (bool): whether to downsample before first convolution
+            - use_conv (bool): if out_channels != in_channels and this is True, use 3x3 convolution to
+            - change number of channels
+            - use_scale_shift_norm (bool): whether to use step embedding to scale and shift input or simply add them
+            - dropout (double): dropout probability
+
+        Returns:
+            - An nn.Module to be used to compose a network.
+    """
     def __init__(self, in_channels, step_channels, dropout, upsample=False, downsample=False,
                  use_conv=False, out_channels=None, use_scale_shift_norm=False):
         super(ResidualBlock, self).__init__()
@@ -95,18 +150,18 @@ class ResidualBlock(UsesSteps):
             self.skip = nn.Identity()
         elif use_conv:
             self.skip = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                                  kernel_size=(3, 3), stride=(1, 1), padding=1)
+                                  kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
         else:
             self.skip = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                                  kernel_size=(1, 1), stride=(1, 1), padding=0)
+                                  kernel_size=(1, 1), stride=(1, 1))
 
         self.in_norm = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-5)
         self.in_conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                                 kernel_size=(3, 3), stride=(1, 1), padding=1)
+                                 kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
 
         self.out_norm = nn.GroupNorm(num_groups=32, num_channels=out_channels, eps=1e-5)
         self.out_conv = zero_module(nn.Conv2d(in_channels=out_channels, out_channels=out_channels,
-                                              kernel_size=(3, 3), stride=(1, 1), padding=1))
+                                              kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))
         if use_scale_shift_norm:
             self.step_embedding = nn.Linear(step_channels, 2 * out_channels)
         else:
@@ -138,6 +193,20 @@ class ResidualBlock(UsesSteps):
 
 
 class AttentionBlock(nn.Module):
+    """
+    Creates an attention-style Transformer block containing QKV-attention, a residual connection,
+    and a linear projection out.
+    Uses 1 layer of GroupNorm (32 groups).
+
+        Parameters:
+            - channels (int): number of channels to pass in and return out
+            - num_heads (int): number of heads to use in Multi-Headed-Attention
+            - num_head_channels (int): number of channels to use for each head. if not None, then this block uses
+            (channels // num_head_channels) heads and ignores num_heads
+
+        Returns:
+            - An nn.Module to be used to compose a network.
+    """
     def __init__(self, channels, num_heads=1, num_head_channels=None):
         super(AttentionBlock, self).__init__()
 
@@ -146,62 +215,66 @@ class AttentionBlock(nn.Module):
         else:
             assert (
                     channels % num_head_channels == 0
-            ), f"channels {channels} is not divisible by num_head_channels {num_head_channels}"
+            ), "channels {} is not divisible by num_head_channels {}".format(channels, num_head_channels)
             self.num_heads = channels // num_head_channels
 
-        self.scale = (channels // num_heads) ** -0.5
+        self.scale = (channels // self.num_heads) ** -0.5
 
         self.qkv_nin = nn.Conv1d(in_channels=channels, out_channels=3 * channels,
-                                 kernel_size=(1,), stride=(1,), padding=0)
+                                 kernel_size=(1,), stride=(1,))
 
         self.norm = nn.GroupNorm(num_groups=32, num_channels=channels, eps=1e-5)
+        # self.proj_out = zero_module(nn.Conv1d(in_channels=channels, out_channels=channels,
+        #                                       kernel_size=(1,), stride=(1,)))
         self.proj_out = zero_module(nn.Conv1d(in_channels=channels, out_channels=channels,
-                                              kernel_size=(1,), stride=(1,), padding=0))
+                                              kernel_size=(1,), stride=(1,)))
 
-    # # My implementation of MHA
-    # def forward(self, x):
-    #     # compute 2-D attention (condense H,W dims into N)
-    #     B, C, H, W = x.shape
-    #     x = x.reshape(B, C, -1)
-    #     qkv = self.norm(x)
-    #
-    #     # Get q, k, v
-    #     qkv = self.qkv_nin(qkv).permute(0, 2, 1)  # b,c,hw -> b,hw,c
-    #     qkv = qkv.reshape(B, H * W, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-    #     q, k, v = qkv.unbind(0)  # q/k/v.shape = b,num_heads,hw,c//num_heads
-    #
-    #     # w = softmax(q @ k / sqrt(d_k))
-    #     w = (q @ k.transpose(-2, -1)) * self.scale
-    #     w = torch.softmax(w, dim=-1)
-    #
-    #     # attention = w @ v
-    #     h = (w @ v).transpose(1, 2).reshape(B, H * W, C).permute(0, 2, 1)
-    #     h = self.proj_out(h)
-    #
-    #     return (h + x).reshape(B, C, H, W)
-
+    # My implementation of MHA
     def forward(self, x):
+        # compute 2-D attention (condense H,W dims into N)
         B, C, H, W = x.shape
         x = x.reshape(B, C, -1)
-        qkv = self.qkv_nin(self.norm(x))
-        bs, width, length = qkv.shape
-        assert width % (3 * self.num_heads) == 0
-        ch = width // (3 * self.num_heads)
-        q, k, v = qkv.chunk(3, dim=1)
-        scale = 1 / math.sqrt(math.sqrt(ch))
-        weight = torch.einsum(
-            "bct,bcs->bts",
-            (q * scale).view(bs * self.num_heads, ch, length),
-            (k * scale).view(bs * self.num_heads, ch, length),
-        )  # More stable with f16 than dividing afterwards
-        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
-        a = torch.einsum("bts,bcs->bct", weight, v.reshape(bs * self.num_heads, ch, length))
-        h = a.reshape(bs, -1, length)
+        qkv = self.norm(x)
+
+        # Get q, k, v
+        qkv = self.qkv_nin(qkv).permute(0, 2, 1)  # b,c,hw -> b,hw,c
+        qkv = qkv.reshape(B, H * W, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)  # q/k/v.shape = b,num_heads,hw,c//num_heads
+
+        # w = softmax(q @ k / sqrt(d_k))
+        w = (q @ k.transpose(-2, -1)) * self.scale
+        w = torch.softmax(w, dim=-1)
+
+        # attention = w @ v
+        h = (w @ v).transpose(1, 2).reshape(B, H * W, C).permute(0, 2, 1)
         h = self.proj_out(h)
-        return (x + h).reshape(B, C, H, W)
+
+        return (h + x).reshape(B, C, H, W)
 
 
 class DiffusionModel(nn.Module):
+    """
+    Creates a Diffusion model to predict epsilon in a generative denoising process.
+
+        Parameters:
+            - resolution (int): height and width resolution of inputs (assumes square images)
+            - in_channels (int): number of channels to pass in
+            - out_channels (int): number of channels to return
+            - model_channels (int): number of channels to use within the model, before any channel multipliers apply
+            - channel_mult (tuple of ints): multipliers for number of inner channels to use
+            - num_res_blocks (int): number of ResidualBlocks to use for each channel multiplier level
+            - resblock_updown (bool): whether to use ResidualBlocks or Upsample/Downsample modules to resample
+            - conv_resample (bool): if resblock_updown is False, whether to use Conv2D layers to resample
+            - attention_resolutions (tuple of ints): which resolutions at which to apply attention
+            - num_classes (int): if not None, number of classes to use for class-conditional models
+            - num_heads (int): number of heads to use for AttentionBlocks
+            - num_head_channels (int): number of channels to use for each head for AttentionBlocks, supersedes num_heads
+            - use_scale_shift_norm (bool): whether to use scale and shift norm with step embeddings in ResidualBlocks
+            - dropout (double): dropout probability in the ResidualBlocks
+
+        Returns:
+            - A UNet model to be used for diffusion.
+    """
     def __init__(
             self,
             resolution,
@@ -219,7 +292,6 @@ class DiffusionModel(nn.Module):
             resblock_updown=False,
             use_scale_shift_norm=False
     ):
-
         super(DiffusionModel, self).__init__()
         self.resolution = resolution
         self.in_channels = in_channels
@@ -246,7 +318,7 @@ class DiffusionModel(nn.Module):
 
         self.downsampling = nn.ModuleList([UsesStepsSequential(torch.nn.Conv2d(in_channels, curr_channels,
                                                                                kernel_size=(3, 3), stride=(1, 1),
-                                                                               padding=1))])
+                                                                               padding=(1, 1)))])
         input_block_channels = [curr_channels]  # Keep track of how many channels each block operates with
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
@@ -324,11 +396,12 @@ class DiffusionModel(nn.Module):
         self.out = nn.Sequential(nn.GroupNorm(num_groups=32, num_channels=curr_channels),
                                  nn.SiLU(),
                                  zero_module(nn.Conv2d(in_channels=input_channels, out_channels=out_channels,
-                                                       kernel_size=(3, 3), stride=(1, 1), padding=1)))
+                                                       kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))))
 
     def forward(self, x, timestep, y=None):
         assert (y is not None) == self.conditional, 'don\'t give y unless class-conditional model'
-        assert x.shape[2] == self.resolution and x.shape[3] == self.resolution, f'incorrect resolution: {x.shape[2:]}'
+        assert x.shape[2] == self.resolution and x.shape[3] == self.resolution, \
+            'incorrect resolution: {}'.format(x.shape[2:])
 
         embedding = self.step_embed(timestep_embedding(timestep, self.model_channels))
 
@@ -363,7 +436,7 @@ def zero_module(module):
     return module
 
 
-# Method to create sinusoidal timestep embeddings, much like those found in Transformers
+# Method to create sinusoidal timestep embeddings, much like positional encodings found in Transformers
 def timestep_embedding(timesteps, embedding_dim, max_period=10000):
     half = embedding_dim // 2
     emb = math.log(max_period) / half
@@ -379,20 +452,21 @@ def timestep_embedding(timesteps, embedding_dim, max_period=10000):
 # ---------------------------------------------------------------------------------------------------------------------
 # ---------------------------------------------------------------------------------------------------------------------
 # ---------------------------------------------------------------------------------------------------------------------
+
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 from diffusion import Diffusion
 
-# Show image (img must be RGB and from [0.0, 255.0])
+
+# Show image (img must be RGB and from [0.0, 1.0] or [0, 255])
 def imshow(img, title=None):
-    # imshow() only accepts pixels [0.0, 1.0] or [0, 255]
     plt.imshow(img)
     if title is not None:
         plt.title(title)
     plt.pause(0.001)
 
 
-# convert state dict from the ones from guided_diffusion to one compatible with my model, returns new OrderedDict
+# convert state dict from the ones from guided_diffusion to one compatible with my model, doesn't change sd
 def convert_state_dict(sd):
     def convert_param_name(name):
         name = name.replace('input_blocks', 'downsampling')
@@ -427,134 +501,74 @@ device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 # device = torch.device('cpu')
 # torch.manual_seed(0)
 
-STATE_DICT_NAME = 'diff64.pt'
-DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
-BATCH_SIZE = 8
+STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
+DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 1.0}
+BATCH_SIZE = 1
+NUM_SAMPLES = 1
 SHOW_PROGRESS = True
 # ---------------------------------------------------------------------------------------------------------------------
 
 # CREATE MODEL
-if STATE_DICT_NAME == 'diff64.pt':
+if STATE_DICT_FILENAME == 'models/64x64_diffusion.pt':
     CONDITIONAL = True
-    DIFF_ARGS = {'beta_schedule': 'cosine', 'sampling_var_type': 'learned_range'}
+    DIFF_ARGS = {'beta_schedule': 'cosine', 'sampling_var_type': 'learned_range', 'device': device}
     MODEL_ARGS = {'resolution': 64, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 2, 3, 4),
-                  'num_heads': 1, 'in_channels': 3, 'out_channels': 6, 'model_channels': 192, 'num_res_blocks': 3,
+                  'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 192,
+                  'num_res_blocks': 3,
                   'resblock_updown': True, 'use_scale_shift_norm': True, 'num_classes': 1000 if CONDITIONAL else None}
-elif STATE_DICT_NAME == 'diff256.pt':
+elif STATE_DICT_FILENAME == 'diff256.pt':
     CONDITIONAL = False
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_range'}
+    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_range', 'device': device}
     MODEL_ARGS = {'resolution': 256, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 1, 2, 2, 4, 4),
-                  'num_heads': 1, 'in_channels': 3, 'out_channels': 6, 'model_channels': 256, 'num_res_blocks': 2,
+                  'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 256,
+                  'num_res_blocks': 2,
                   'resblock_updown': True, 'use_scale_shift_norm': True, 'num_classes': 1000 if CONDITIONAL else None}
-elif STATE_DICT_NAME == 'cifar.pt':
+elif STATE_DICT_FILENAME == 'cifar.pt':
     CONDITIONAL = False
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'small'}
+    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'small', 'device': device}
     MODEL_ARGS = {'resolution': 32, 'attention_resolutions': (16,), 'channel_mult': (1, 2, 2, 2),
-                  'num_heads': 1, 'in_channels': 3, 'out_channels': 3, 'model_channels': 128, 'num_res_blocks': 2,
+                  'num_heads': 1, 'in_channels': 3, 'out_channels': 3, 'model_channels': 128,
+                  'num_res_blocks': 2,
                   'resblock_updown': False, 'use_scale_shift_norm': False, 'num_classes': 1000 if CONDITIONAL else None}
 else:
-    raise NotImplementedError(STATE_DICT_NAME)
+    raise NotImplementedError(STATE_DICT_FILENAME)
 
-model = DiffusionModel(**MODEL_ARGS, num_head_channels=64)
-model.load_state_dict(convert_state_dict(torch.load(STATE_DICT_NAME, map_location="cpu")), strict=True)
+model = DiffusionModel(**MODEL_ARGS)
+model.load_state_dict(convert_state_dict(torch.load(STATE_DICT_FILENAME, map_location="cpu")), strict=True)
 model.to(device).eval()
 
-print(f'Model made with {sum(p.numel() for p in model.parameters())} parameters! :)')
+print('Model made from {} with {} parameters! :)\n'.
+      format(STATE_DICT_FILENAME, sum(p.numel() for p in model.parameters())))
 
-# CREATE RANDOM DATA
-data = torch.randn([BATCH_SIZE, 3, MODEL_ARGS['resolution'], MODEL_ARGS['resolution']]).to(device)
-label = torch.randint(low=0, high=1000, size=(BATCH_SIZE,), device=device) if CONDITIONAL else None
+print('Starting Diffusion! There are {} samples of {} images each\n'.format(NUM_SAMPLES, BATCH_SIZE))
+samples = []
+DIFFUSION_ARGS.update(DIFF_ARGS)
+diffusion = Diffusion(model=model, **DIFFUSION_ARGS)
+for i_sample in range(1, NUM_SAMPLES + 1):
+    # CREATE RANDOM DATA
+    data = torch.randn([BATCH_SIZE, 3, MODEL_ARGS['resolution'], MODEL_ARGS['resolution']]).to(device)
+    labels = torch.randint(low=0, high=1000, size=(BATCH_SIZE,), device=device) if CONDITIONAL else None
 
-# RUN DIFFUSION
-print('Doing Diffusion! :)\n')
-diffusion = Diffusion(model=model, **DIFFUSION_ARGS, **DIFF_ARGS, device=device)
-out = diffusion.denoise(x=data, label=label, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS)
+    # RUN DIFFUSION
+    print('Denoising sample {}! :)'.format(i_sample))
+    out = diffusion.denoise(x=data, label=labels, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS)
 
-# Convert from [-1.0, 1.0] to [0, 255]
-out = ((out + 1) * 127.5).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)
-data = data.cpu().permute(0, 2, 3, 1).detach().numpy()
-out = out.cpu().detach().numpy()
+    # Convert from [-1.0, 1.0] to [0, 255]
+    out = ((out + 1) * 127.5).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)
+    data = data.cpu().permute(0, 2, 3, 1).detach().numpy()
+    out = out.cpu().detach().numpy()
 
-for im in range(BATCH_SIZE):
-    plt.close('all')
-    fig = plt.figure(figsize=(7, 3))
-    fig.add_subplot(1, 2, 1)
-    imshow(data[im], title='Input Noise')
-    fig.add_subplot(1, 2, 2)
-    imshow(out[im], title='Output Image')
-    plt.waitforbuttonpress()
+    samples.append((data, out))
+    print()
 
-# ---------------------------------------------------------------------------------------------------------------------
-# CODE STASH FOR COMPARING
-# # # Copied from https://github.com/pesser/pytorch_diffusion, which is where the state dict is from
-# # model2 = Model(resolution=32, in_channels=3, out_ch=3, attn_resolutions=(16,),
-# #                ch_mult=(1, 2, 2, 2), ch=128, num_res_blocks=2)
-# # model2.load_state_dict(torch.load('cifar.pt', map_location=torch.device('cuda')), strict=True)
-# # # model2.to(device).eval()
-#
-# # # From openai/guided-diffusion
-# # model3 = UNetModel(image_size=256, attention_resolutions=(8, 16, 32), num_res_blocks=2, resblock_updown=True,
-# #                    use_scale_shift_norm=True, use_fp16=False, model_channels=256, in_channels=3, out_channels=6,
-# #                    channel_mult=(1, 1, 2, 2, 4, 4), num_classes=None, num_heads=4)
-# # model3.load_state_dict(state_dict, strict=True)
-# # model3.to(device).eval()
-#
-# print('Mine:\t', sum(p.numel() for p in model.parameters() if p.requires_grad), 'parameters from',
-#       sum(1 for p in model.parameters() if p.requires_grad), 'tensors')
-# # print('Pesser:\t', sum(p.numel() for p in model2.parameters() if p.requires_grad), 'parameters from',
-# #       sum(1 for p in model2.parameters() if p.requires_grad), 'tensors')
-# # print('OpenAI:\t', sum(p.numel() for p in model3.parameters() if p.requires_grad), 'parameters from',
-# #       sum(1 for p in model3.parameters() if p.requires_grad), 'tensors')
-# # print('\n')
-#
-# # torch.manual_seed(0)
-# data = torch.randn([1, 3, 64, 64]).to(device)
-# label = torch.randint(low=0, high=1000, size=(data.shape[0],), device=device)
-# # timestep = torch.randn([data.shape[0]]).to(device)
-#
-# # out = model(data, timestep, y=label).cpu().detach()
-# # out3 = model3(data, timestep, y=label).cpu().detach()
-#
-# # # RUN DIFFUSION
-# diffusion = Diffusion(model=model, num_steps=1000, sampling_var_type='learned',
-#                       ddim_steps=25, ddim_eta=0.0, device=device)
-# out = diffusion.denoise(x=data, label=label, batch_size=data.shape[0], progress=True)
-#
-# model3 = model
-# # diffusion3 = GaussianDiffusion(betas=get_beta_schedule('linear', 0.0001, 0.02, 250),
-# #                                model_var_type=ModelVarType.LEARNED, model_mean_type=ModelMeanType.EPSILON,
-# #                                loss_type=LossType.KL)
-# print('\n')
-# diffusion3 = SpacedDiffusion(use_timesteps=space_timesteps(1000, 'ddim25'),
-#                              betas=get_beta_schedule('linear', 0.0001, 0.02, 1000), loss_type=LossType.KL,
-#                              model_var_type=ModelVarType.LEARNED, model_mean_type=ModelMeanType.EPSILON)
-# # out3 = diffusion3.p_sample_loop(model=model3, shape=data.shape, progress=True, model_kwargs={'y': label})
-# out3 = diffusion3.ddim_sample_loop(noise=data, model=model3, shape=data.shape, progress=True,
-#                                    model_kwargs={'y': label}, eta=0.0)
-#
-# # Convert from [-1.0, 1.0] to [0, 255]
-# out = ((out + 1) * 127.5).clamp(0, 255).to(torch.uint8)
-# out3 = ((out3 + 1) * 127.5).clamp(0, 255).to(torch.uint8)
-#
-# data = data.cpu().permute(0, 2, 3, 1).detach().numpy()
-# out = out.cpu().detach().permute(0, 2, 3, 1).numpy()
-# out3 = out3.cpu().detach().permute(0, 2, 3, 1).numpy()
-#
-# print(np.sum(np.abs(out - out3)))
-#
-# for im in range(data.shape[0]):
-#     plt.close('all')
-#     fig = plt.figure(figsize=(7, 3))
-#     fig.add_subplot(1, 2, 1)
-#     imshow(data[im])
-#     fig.add_subplot(1, 2, 2)
-#     imshow(out[im])
-#     plt.waitforbuttonpress()
-# for im in range(data.shape[0]):
-#     plt.close('all')
-#     fig = plt.figure(figsize=(7, 3))
-#     fig.add_subplot(1, 2, 1)
-#     imshow(data[im])
-#     fig.add_subplot(1, 2, 2)
-#     imshow(out3[im])
-#     plt.waitforbuttonpress()
+print('Displaying {} generated images!'.format(NUM_SAMPLES * BATCH_SIZE))
+for sample in samples:
+    data, out = sample
+    for b in range(BATCH_SIZE):
+        plt.close('all')
+        fig = plt.figure(figsize=(7, 3))
+        fig.add_subplot(1, 2, 1)
+        imshow(data[b], title='Input Noise')
+        fig.add_subplot(1, 2, 2)
+        imshow(out[b], title='Output Image')
+        plt.waitforbuttonpress()

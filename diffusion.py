@@ -3,6 +3,16 @@ import torch
 import numpy as np
 import tqdm
 
+'''
+DIFFUSION AND DENOISING UTILITIES BASED ON THE FOLLOWING PAPERS AND CORRESPONDING WORK:
+    - Ho et al. Denoising Diffusion Probabilistic Models (DDPM): https://arxiv.org/pdf/2006.11239.pdf
+    - Song et al. Denoising Diffusion Implicit Models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
+    - Dhariwal/Nichol Diffusion Model Beats GAN on Image Synthesis (OpenAI): https://arxiv.org/pdf/2105.05233.pdf
+    
+    Diffusion and denoising implementation are recreated from the DDPM paper, and DDIM implementation is based on 
+    OpenAI's implementation.
+'''
+
 
 # Returns schedule for desired noise variance at each timestep
 # Methods are linear, constant (uses beta_0), cosine (doesnt use beta_0 nor beta_T)
@@ -22,107 +32,45 @@ def get_beta_schedule(schedule_method, beta_0, beta_T, num_steps):
             betas.append(min(1 - alpha_mean_func(s2) / alpha_mean_func(s1), 0.999))
         return np.array(betas)
     else:
-        raise NotImplementedError(f"unimplemented variance scheduling method: {schedule_method}")
+        raise NotImplementedError("unimplemented variance scheduling method: {}".format(schedule_method))
     return betas
 
 
-# Extract a (numpy array)'s elements based on t (tensor) in a way that is broadcastable with shape
+# Index into a (numpy array)'s elements with index t (tensor), returning a tensor that is broadcastable to shape
 def extract(a, t, broadcast_shape):
     result = torch.gather(torch.from_numpy(a).to(t.device).float(), 0, t.long())
-    # Keep adding dimensions to results
+    # Keep adding dimensions to results until right shape
     while len(result.shape) < len(broadcast_shape):
         result = result[..., None]
     return result.expand(broadcast_shape)
 
 
-# Samples from q(x_t | x_0), i.e. applies t steps of noise to x_0
-def noising_step(x, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None):
-    if noise is None:
-        noise = torch.randn_like(x)
-    # eq. 2 in Ho et al. DDPM paper
-    return extract(sqrt_alphas_cumprod, t, x.shape) * x + extract(sqrt_one_minus_alphas_cumprod, t, x.shape) * noise
-
-
-# Samples from p(x_{t-1} | x_t), i.e. uses model to predict noise, then samples from corresponding possible x_{t-1}'s
-# If return_x0, also returns the predicted initial image x_0
-def denoising_step(x_t, t, timestep_map, model, log_var, var_type,
-                   sqrt_reciprocal_alphas_cumprod, sqrt_reciprocal_alphas_minus_one_cumprod,
-                   posterior_mean_coef1, posterior_mean_coef2,
-                   log_postvar=None, betas=None, y=None, return_x0=False, clip_x=True):
-    eps_pred = model(x_t, timestep_map[t.long()], y=y)
-    if var_type == 'learned':
-        c = int(eps_pred.shape[1] / 2)
-        eps_pred, log_var = torch.split(eps_pred, c, dim=1)
-    elif var_type == 'learned_range':
-        assert log_postvar is not None and betas is not None
-        c = int(eps_pred.shape[1] / 2)
-        eps_pred, log_var = torch.split(eps_pred, c, dim=1)
-
-        min_log = extract(log_postvar, t, x_t.shape)
-        max_log = extract(np.log(betas), t, x_t.shape)
-        # The model_var_values is [-1, 1] for [min_var, max_var]
-        frac = (log_var + 1) / 2
-        log_var = frac * max_log + (1 - frac) * min_log
-    else:
-        log_var = extract(log_var, t, x_t.shape)
-    pred_x0 = extract(sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - \
-              extract(sqrt_reciprocal_alphas_minus_one_cumprod, t, x_t.shape) * eps_pred
-    if clip_x:
-        pred_x0 = torch.clamp(pred_x0, -1, 1)
-
-    # Calculate mean of q(x_{t-1} | x_t, x_0) (eq. 6 in Ho et al. DDPM paper)
-    mean = extract(posterior_mean_coef1, t, x_t.shape) * pred_x0 + extract(posterior_mean_coef2, t, x_t.shape) * x_t
-
-    # Return sample pred for x_0 using calculated mean and given log variance
-    noise = torch.randn_like(x_t)
-    mask = 1.0 - (t == 0).float()
-    mask = mask.reshape((x_t.shape[0],) + (1,) * (len(x_t.shape) - 1))
-
-    sample = mean + mask * torch.exp(0.5 * log_var) * noise
-    sample = sample.float()
-
-    if return_x0:
-        return sample, pred_x0
-    return sample
-
-
-def ddim_denoising_step(x_t, t, timestep_map, model, eta, var_type, alphas_cumprod, alphas_cumprod_prev,
-                        sqrt_reciprocal_alphas_cumprod, sqrt_reciprocal_alphas_minus_one_cumprod,
-                        y=None, return_x0=False, clip_x=True):
-    eps_pred = model(x_t, timestep_map[t.long()], y=y)
-    if var_type == 'learned' or var_type == 'learned_range':
-        c = int(eps_pred.shape[1] / 2)
-        eps_pred, _ = torch.split(eps_pred, c, dim=1)
-
-    pred_x0 = extract(sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - \
-              extract(sqrt_reciprocal_alphas_minus_one_cumprod, t, x_t.shape) * eps_pred
-    if clip_x:
-        pred_x0 = torch.clamp(pred_x0, -1, 1)
-
-    eps_pred = (extract(sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - pred_x0) / \
-               extract(sqrt_reciprocal_alphas_minus_one_cumprod, t, x_t.shape)
-    alpha_bar = extract(alphas_cumprod, t, x_t.shape)
-    alpha_bar_prev = extract(alphas_cumprod_prev, t, x_t.shape)
-    var = eta ** 2 * (1.0 - alpha_bar_prev) * (1.0 - alpha_bar / alpha_bar_prev) / (1.0 - alpha_bar)
-
-    # equation 12 from openai
-    mean = pred_x0 * torch.sqrt(alpha_bar_prev) + torch.sqrt(1 - alpha_bar_prev - var) * eps_pred
-
-    noise = torch.randn_like(x_t)
-    mask = 1.0 - (t == 0).float()
-    mask = mask.reshape((x_t.shape[0],) + (1,) * (len(x_t.shape) - 1))
-
-    sample = mean + mask * torch.sqrt(var) * noise
-    sample = sample.float()
-
-    if return_x0:
-        return sample, pred_x0
-    return sample
-
-
 class Diffusion:
-    def __init__(self, model, original_num_steps, rescaled_num_steps, sampling_var_type, betas=None,
-                 beta_schedule='linear',
+    """
+    Creates an object to handle a diffusion chain and a reverse diffusion (denoising) chain, with or without DDIM
+    sampling.
+
+        Parameters:
+            - model (DiffusionModel): trained model to predict epsilon from noisy image
+            - original_num_steps (int): number of diffusion steps that model was trained with (T)
+            - rescaled_num_steps (int): number of diffusion steps to be considered when sampling
+            - sampling_var_type (str): type of variance calculation -- 'small' or 'large' for fixed variances of given
+              sizes, 'learned' or 'learned_range' for variances predicted by model
+            - beta_schedule (str): scheduling method for noise variances (betas) -- 'linear', 'constant', or 'cosine'
+            - betas (np.array): alternative to beta_schedule where betas are directly supplied
+            - use_ddim (bool): whether to use DDIM sampling. if True, interpret rescaled_num_steps as number of DDIM
+              steps
+            - ddim_eta (double): value to be used when performing DDIM
+            - device (torch.device): if not None, which device to perform diffusion with
+
+
+        Returns:
+            - Diffusion object to call .diffuse() or .denoise() with.
+    """
+    def __init__(self, model,
+                 original_num_steps, rescaled_num_steps,
+                 sampling_var_type,
+                 betas=None, beta_schedule='linear',
                  use_ddim=False, ddim_eta=None, device=None):
         self.model = model
         if device is None:
@@ -133,21 +81,23 @@ class Diffusion:
         self.original_num_steps = original_num_steps
         self.rescaled_num_steps = rescaled_num_steps
         self.sampling_var_type = sampling_var_type
-        assert use_ddim == (ddim_eta is not None), 'please pick if u do or dont want ddim'
+        if use_ddim:
+            assert ddim_eta is not None, 'please supply eta if you want to use ddim'
         self.use_ddim = use_ddim
         self.ddim_eta = ddim_eta
 
         if betas is None:
             betas = get_beta_schedule(beta_schedule, 0.0001, 0.02, original_num_steps)
         else:
+            assert len(betas) == original_num_steps, 'betas must be the right length!'
             betas = np.array(betas, dtype=np.float64)
-        self.num_timesteps = betas.shape[0]
 
-        alphas = 1.0 - betas
-        alphas_cumprod = np.cumprod(alphas, axis=0)
-
-        # Rescale betas
-        rescaled_timesteps = list(range(3, original_num_steps + 3, original_num_steps // rescaled_num_steps))
+        # Rescale betas to match the number of rescaled diffusion steps
+        alphas = 1.0 - betas  # array of alpha_t for indices t
+        alphas_cumprod = np.cumprod(alphas, axis=0)  # alphabar_t
+        rescaled_timesteps = list(range(0 + original_num_steps // (2 * rescaled_num_steps),
+                                        original_num_steps + original_num_steps // (2 * rescaled_num_steps),
+                                        original_num_steps // rescaled_num_steps))
         last_alpha_cumprod = 1.0
         new_betas = []
         for i, alpha_cumprod in enumerate(alphas_cumprod):
@@ -155,29 +105,31 @@ class Diffusion:
                 new_betas.append(1.0 - alpha_cumprod / last_alpha_cumprod)
                 last_alpha_cumprod = alpha_cumprod
         betas = np.array(new_betas)
-        alphas = 1.0 - betas
-        sqrt_alphas = np.sqrt(alphas)
-        alphas_cumprod = np.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])
-        self.betas = betas
-        self.timestep_map = torch.tensor(rescaled_timesteps, device=device, dtype=torch.long)
 
-        # values for ddim posterior
-        self.alphas_cumprod = alphas_cumprod
-        self.alphas_cumprod_prev = alphas_cumprod_prev
+        self.betas = betas  # scheduled noise variance for each timestep
+        self.timestep_map = torch.tensor(rescaled_timesteps,
+                                         device=device, dtype=torch.long)  # map from rescaled to original timesteps
 
-        # calculations for diffusion q(x_t | x_0) i.e. noising and others
-        self.sqrt_alphas_cumprod = np.sqrt(alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - alphas_cumprod)
+        # calculate and store various values to be used in diffusion, denoising, and ddim denoising
+        # All these are arrays whose values at index t correspond to the comments next to them
+        alphas = 1.0 - betas  # alpha_t
+        sqrt_alphas = np.sqrt(alphas)  # sqrt(alpha_t)
+        self.alphas_cumprod = alphas_cumprod = np.cumprod(alphas, axis=0)  # alphabar_t
+        self.alphas_cumprod_prev = alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])  # alphabar_{t-1}
+        self.sqrt_alphas_cumprod = np.sqrt(alphas_cumprod)  # sqrt(alphabar_t)
+        self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - alphas_cumprod)  # sqrt(1 - alphabar_t)
+        self.sqrt_reciprocal_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod)  # sqrt(1 / alphabar_t)
+        self.sqrt_reciprocal_alphas_minus_one_cumprod = \
+            np.sqrt(1.0 / alphas_cumprod - 1)  # sqrt((1 - alphabar_t) / alphabar_t)
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0) i.e. denoising
-        self.sqrt_reciprocal_alphas_cumprod = np.sqrt(np.reciprocal(alphas_cumprod))
-        self.sqrt_reciprocal_alphas_minus_one_cumprod = np.sqrt(np.reciprocal(alphas_cumprod) - 1)
-        posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)  # from sec 3.2 of Ho et. al
-        self.log_postvar_clipped = np.log(np.append(posterior_variance[1], posterior_variance[1:]))
-        self.posterior_mean_coef1 = betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-        self.posterior_mean_coef2 = (1.0 - alphas_cumprod_prev) * sqrt_alphas / (1.0 - alphas_cumprod)
-        # Ho et. al implement fixed variances, but Dhariwal/Nichol prefer to learn the variances
+        # Calculate posterior means and variances for forward (i.e. q sampling/diffusion) process, (eq. 7 in DDPM)
+        self.posterior_mean_coef_x0 = np.sqrt(alphas_cumprod_prev) * betas / (1.0 - alphas_cumprod)
+        self.posterior_mean_coef_xt = sqrt_alphas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+        posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+        # Clip to remove variance at 0, since it will be strange
+        self.log_posterior_var_clipped = np.log(np.append(posterior_variance[1], posterior_variance[1:]))
+
+        # DDPM implements fixed variances, but OpenAI prefer to learn the variances
         if sampling_var_type == 'large':
             self.log_var = np.log(np.append(posterior_variance[1], betas[1:]))
         elif sampling_var_type == 'small':
@@ -187,19 +139,42 @@ class Diffusion:
         else:
             raise NotImplementedError(sampling_var_type)
 
-    def diffuse(self, x, steps_to_do=None, batch_size=1):
+    def diffuse(self, x, steps_to_do=None):
+        """
+        Add noise to an input corresponding to a given number of steps in the diffusion Markov chain.
+
+            Parameters:
+                - x (torch.tensor): input image to diffuse (usually x_0)
+                - steps_to_do (int): number of rescaled diffusion steps to apply forward
+
+            Returns:
+                - Diffused image(s).
+        """
         with torch.no_grad():
             # If unspecified or invalid number of steps to do, go until completion x_T
-            if steps_to_do is None or steps_to_do > self.original_num_steps:
-                steps_to_do = self.original_num_steps
+            if steps_to_do is None or steps_to_do > self.rescaled_num_steps:
+                steps_to_do = self.rescaled_num_steps
 
-            timestep = (steps_to_do * torch.ones(batch_size)).to(self.device)
-            x = noising_step(x, t=timestep,
-                             sqrt_alphas_cumprod=self.sqrt_alphas_cumprod,
-                             sqrt_one_minus_alphas_cumprod=self.sqrt_one_minus_alphas_cumprod)
+            timestep = (steps_to_do * torch.ones(x.shape[0])).to(self.device)
+            x = self.diffusion_step(x, t=timestep)
         return x
 
     def denoise(self, x=None, label=None, start_step=None, steps_to_do=None, batch_size=1, progress=True):
+        """
+        Sample the posterior of the forward process in the diffusion Markov chain. If self.use_ddim is True, uses DDIM
+        sampling instead of traditional DDPM sampling.
+
+            Parameters:
+                - x (torch.tensor): if not None, input image x_t to denoise. if None, denoises Gaussian noise x_T
+                - label (torch.tensor): if model is class-conditional, tensor of label to use to guide denoising
+                - start_step (int): which rescaled step to start at. should correspond to x's timestep
+                - steps_to_do (int): number of rescaled diffusion steps to apply forward
+                - batch_size (int): batch size of denoising process. only used if x is None
+                - progress (bool): whether to show tqdm progress bar
+
+            Returns:
+                - Denoised sample(s).
+        """
         assert (label is not None) == self.model.conditional, 'pass label iff model is class-conditional'
         with torch.no_grad():
             # If no specified starting step, start from x = x_T
@@ -225,30 +200,102 @@ class Diffusion:
             else:
                 indices = reversed(indices)
 
-            if not self.use_ddim:
+            if not self.use_ddim:  # NORMAL DDPM
                 assert len(indices) == steps_to_do
                 for t in indices:
-                    timestep = (t * torch.ones(batch_size)).to(self.device)
-                    x, x_0 = denoising_step(x, t=timestep, timestep_map=self.timestep_map,
-                                            y=label, model=self.model, return_x0=True,
-                                            var_type=self.sampling_var_type, betas=self.betas,
-                                            log_var=self.log_var, log_postvar=self.log_postvar_clipped,
-                                            sqrt_reciprocal_alphas_cumprod=self.sqrt_reciprocal_alphas_cumprod,
-                                            sqrt_reciprocal_alphas_minus_one_cumprod=self.
-                                            sqrt_reciprocal_alphas_minus_one_cumprod,
-                                            posterior_mean_coef1=self.posterior_mean_coef1,
-                                            posterior_mean_coef2=self.posterior_mean_coef2)
+                    timestep = (t * torch.ones(x.shape[0])).to(self.device)
+                    x, x_0 = self.denoising_step(x, t=timestep, y=label, return_x0=True)
 
-            else:  # APPLY DDIM
+            else:  # DDIM SAMPLING
                 assert len(indices) == self.rescaled_num_steps
                 for t in indices:
-                    timestep = (t * torch.ones(batch_size)).to(self.device)
-                    x, x_0 = ddim_denoising_step(x, t=timestep, timestep_map=self.timestep_map,
-                                                 y=label, model=self.model, return_x0=True,
-                                                 var_type=self.sampling_var_type, eta=self.ddim_eta,
-                                                 alphas_cumprod=self.alphas_cumprod,
-                                                 alphas_cumprod_prev=self.alphas_cumprod_prev,
-                                                 sqrt_reciprocal_alphas_cumprod=self.sqrt_reciprocal_alphas_cumprod,
-                                                 sqrt_reciprocal_alphas_minus_one_cumprod=self.
-                                                 sqrt_reciprocal_alphas_minus_one_cumprod)
+                    timestep = (t * torch.ones(x.shape[0])).to(self.device)
+                    x, x_0 = self.ddim_denoising_step(x, t=timestep, y=label, return_x0=True)
         return x
+
+    # -----------------------------------------------------------------------------------------------------------------
+
+    # Samples from q(x_t | x_0), i.e. applies t steps of noise to x_0
+    def diffusion_step(self, x, t, noise=None):
+        if noise is None:
+            noise = torch.randn_like(x)
+        # (eq. 4 in DDPM paper)
+        return extract(self.sqrt_alphas_cumprod, t, x.shape) * x + extract(
+            self.sqrt_one_minus_alphas_cumprod, t, x.shape) * noise
+
+    # Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible x_{t-1}'s
+    # If return_x0, also returns the predicted initial image x_0
+    def denoising_step(self, x_t, t, y=None, return_x0=False, clip_x=True):
+        eps_pred = self.model(x_t, self.timestep_map[t.long()], y=y)
+        if self.sampling_var_type == 'learned':
+            c = int(eps_pred.shape[1] / 2)
+            eps_pred, log_var = torch.split(eps_pred, c, dim=1)
+        elif self.sampling_var_type == 'learned_range':
+            assert self.log_posterior_var_clipped is not None and self.betas is not None
+            c = int(eps_pred.shape[1] / 2)
+            eps_pred, log_var = torch.split(eps_pred, c, dim=1)
+
+            min_log = extract(self.log_posterior_var_clipped, t, x_t.shape)
+            max_log = extract(np.log(self.betas), t, x_t.shape)
+            # The model_var_values is [-1, 1] for [min_var, max_var]
+            frac = (log_var + 1) / 2
+            log_var = frac * max_log + (1 - frac) * min_log
+        else:
+            log_var = extract(self.log_var, t, x_t.shape)
+
+        # Predict x_start from x_t and epsilon (eq. 11 in DDPM paper)
+        pred_x0 = extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - extract(
+            self.sqrt_reciprocal_alphas_minus_one_cumprod, t, eps_pred.shape) * eps_pred
+        if clip_x:
+            pred_x0 = torch.clamp(pred_x0, -1, 1)
+
+        # Calculate mean of posterior q(x_{t-1} | x_t, x_0) (eq. 7 in DDPM paper)
+        mean = extract(self.posterior_mean_coef_x0, t, pred_x0.shape) * pred_x0 + extract(
+            self.posterior_mean_coef_xt, t, x_t.shape) * x_t
+
+        # Return sample pred for x_0 using calculated mean and given log variance, evaluated at desired timestep
+        # (Between eq. 11 and eq. 12 in DDPM paper)
+        noise = torch.randn_like(x_t)
+        mask = 1.0 - (t == 0).float()
+        mask = mask.reshape((x_t.shape[0],) + (1,) * (len(x_t.shape) - 1))
+
+        sample = mean + mask * torch.exp(0.5 * log_var) * noise
+        sample = sample.float()
+
+        if return_x0:
+            return sample, pred_x0
+        return sample
+
+    # Implement denoising diffusion implicit models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
+    def ddim_denoising_step(self, x_t, t, y=None, return_x0=False, clip_x=True):
+        eps_pred = self.model(x_t, self.timestep_map[t.long()], y=y)
+        if self.sampling_var_type == 'learned' or self.sampling_var_type == 'learned_range':
+            c = int(eps_pred.shape[1] / 2)
+            eps_pred, _ = torch.split(eps_pred, c, dim=1)
+
+        # Same as in DDPM (eq. 11)
+        pred_x0 = extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - extract(
+            self.sqrt_reciprocal_alphas_minus_one_cumprod, t, x_t.shape) * eps_pred
+        if clip_x:
+            pred_x0 = torch.clamp(pred_x0, -1, 1)
+
+        # Accelerated sampling of Generative Process (secs. 4.1 and 4.2 in DDIM)
+        # (eq. 12 in DDIM)
+        eps_pred = (extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - pred_x0) / extract(
+            self.sqrt_reciprocal_alphas_minus_one_cumprod, t, x_t.shape)
+        alpha_bar = extract(self.alphas_cumprod, t, x_t.shape)
+        alpha_bar_prev = extract(self.alphas_cumprod_prev, t, x_t.shape)
+        var = self.ddim_eta ** 2 * (1.0 - alpha_bar_prev) * (1.0 - alpha_bar / alpha_bar_prev) / (1.0 - alpha_bar)
+
+        mean = pred_x0 * torch.sqrt(alpha_bar_prev) + torch.sqrt(1 - alpha_bar_prev - var) * eps_pred
+
+        noise = torch.randn_like(x_t)
+        mask = 1.0 - (t == 0).float()
+        mask = mask.reshape((x_t.shape[0],) + (1,) * (len(x_t.shape) - 1))
+
+        sample = mean + mask * torch.sqrt(var) * noise
+        sample = sample.float()
+
+        if return_x0:
+            return sample, pred_x0
+        return sample
