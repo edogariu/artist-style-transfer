@@ -13,6 +13,9 @@ Learning the style of a whole artist instead of simply the style of a specified 
      - 'classifier' (backprop through pre-trained artist classfier)
      
      
+## In the works:
+  - Class-conditional guided Gaussian Diffusion model! 
+  - Eventually a class-conditional GAN
  
 ## Acknowledgements:
   - Painting dataset gotten from the following Kaggle competiton:
