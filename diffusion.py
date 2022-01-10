@@ -7,10 +7,8 @@ import tqdm
 DIFFUSION AND DENOISING UTILITIES BASED ON THE FOLLOWING PAPERS AND CORRESPONDING WORK:
     - Ho et al. Denoising Diffusion Probabilistic Models (DDPM): https://arxiv.org/pdf/2006.11239.pdf
     - Song et al. Denoising Diffusion Implicit Models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
+    - Dhariwal/Nichol Improved Denoising Diffusion Probabilistic Models (IDDPM): https://arxiv.org/pdf/2102.09672.pdf
     - Dhariwal/Nichol Diffusion Model Beats GAN on Image Synthesis (OpenAI): https://arxiv.org/pdf/2105.05233.pdf
-    
-    Diffusion and denoising implementation are recreated from the DDPM paper, and DDIM implementation is based on 
-    OpenAI's implementation.
 '''
 
 
@@ -21,15 +19,17 @@ def get_beta_schedule(schedule_method, beta_0, beta_T, num_steps):
         betas = np.linspace(beta_0, beta_T, num_steps, dtype=np.float64)
     elif schedule_method == 'constant':
         betas = beta_0 * np.ones(num_steps, dtype=np.float64)
-    elif schedule_method == 'cosine':
-        def alpha_mean_func(t):
-            return math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+    elif schedule_method == 'cosine':  # from (eq. 17 of IDDPM)
+        # function f(t) described in (eq. 17 of IDDPM)
+        def f(t):
+            s = 0.008  # extra value to add to fraction to prevent singularity
+            return math.cos((t + s) / (1.0 + s) * math.pi / 2) ** 2
 
         betas = []
-        for s in range(num_steps):
-            s1 = s / num_steps
-            s2 = (s + 1) / num_steps
-            betas.append(min(1 - alpha_mean_func(s2) / alpha_mean_func(s1), 0.999))
+        for step in range(num_steps):
+            alphabar_t_minus_one = step / num_steps
+            alphabar_t = (step + 1) / num_steps
+            betas.append(min(1 - f(alphabar_t) / f(alphabar_t_minus_one), 0.999))  # clip beta to be <= 0.999
         return np.array(betas)
     else:
         raise NotImplementedError("unimplemented variance scheduling method: {}".format(schedule_method))
@@ -58,6 +58,9 @@ class Diffusion:
               sizes, 'learned' or 'learned_range' for variances predicted by model
             - beta_schedule (str): scheduling method for noise variances (betas) -- 'linear', 'constant', or 'cosine'
             - betas (np.array): alternative to beta_schedule where betas are directly supplied
+            - guidance_method (str): method of denoising guidance to use -- None, 'classifier', or 'classifier_free'
+            - classifier (nn.Module): if guidance_method == 'classifier', which classifier model to use
+            - guidance_strength (double): if guidance_method is not None, controls strength of guidance method selected
             - use_ddim (bool): whether to use DDIM sampling. if True, interpret rescaled_num_steps as number of DDIM
               steps
             - ddim_eta (double): value to be used when performing DDIM
@@ -67,10 +70,12 @@ class Diffusion:
         Returns:
             - Diffusion object to call .diffuse() or .denoise() with.
     """
+
     def __init__(self, model,
                  original_num_steps, rescaled_num_steps,
                  sampling_var_type,
                  betas=None, beta_schedule='linear',
+                 guidance_method=None, guidance_strength=None, classifier=None,
                  use_ddim=False, ddim_eta=None, device=None):
         self.model = model
         if device is None:
@@ -78,9 +83,19 @@ class Diffusion:
         else:
             self.device = device
         self.model.to(self.device)
+        self.model.eval()
+
+        self.guidance = guidance_method
+        self.strength = guidance_strength
+        self.classifier = classifier
+        if self.classifier is not None:
+            self.classifier.float().to(self.device)
+            self.classifier.eval()
+
         self.original_num_steps = original_num_steps
         self.rescaled_num_steps = rescaled_num_steps
         self.sampling_var_type = sampling_var_type
+
         if use_ddim:
             assert ddim_eta is not None, 'please supply eta if you want to use ddim'
         self.use_ddim = use_ddim
@@ -92,7 +107,7 @@ class Diffusion:
             assert len(betas) == original_num_steps, 'betas must be the right length!'
             betas = np.array(betas, dtype=np.float64)
 
-        # Rescale betas to match the number of rescaled diffusion steps
+        # Rescale betas to match the number of rescaled diffusion steps with (eq. 19 in IDDPM)
         alphas = 1.0 - betas  # array of alpha_t for indices t
         alphas_cumprod = np.cumprod(alphas, axis=0)  # alphabar_t
         rescaled_timesteps = list(range(0 + original_num_steps // (2 * rescaled_num_steps),
@@ -129,7 +144,7 @@ class Diffusion:
         # Clip to remove variance at 0, since it will be strange
         self.log_posterior_var_clipped = np.log(np.append(posterior_variance[1], posterior_variance[1:]))
 
-        # DDPM implements fixed variances, but OpenAI prefer to learn the variances
+        # DDPM implements fixed variances, but IDDPM prefer to learn the variances
         if sampling_var_type == 'large':
             self.log_var = np.log(np.append(posterior_variance[1], betas[1:]))
         elif sampling_var_type == 'small':
@@ -204,13 +219,13 @@ class Diffusion:
                 assert len(indices) == steps_to_do
                 for t in indices:
                     timestep = (t * torch.ones(x.shape[0])).to(self.device)
-                    x, x_0 = self.denoising_step(x, t=timestep, y=label, return_x0=True)
+                    x, x_0 = self.denoising_step(x, t=timestep, y=label)
 
             else:  # DDIM SAMPLING
                 assert len(indices) == self.rescaled_num_steps
                 for t in indices:
                     timestep = (t * torch.ones(x.shape[0])).to(self.device)
-                    x, x_0 = self.ddim_denoising_step(x, t=timestep, y=label, return_x0=True)
+                    x, x_0 = self.ddim_denoising_step(x, t=timestep, y=label)
         return x
 
     # -----------------------------------------------------------------------------------------------------------------
@@ -225,7 +240,7 @@ class Diffusion:
 
     # Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible x_{t-1}'s
     # If return_x0, also returns the predicted initial image x_0
-    def denoising_step(self, x_t, t, y=None, return_x0=False, clip_x=True):
+    def denoising_step(self, x_t, t, y=None, clip_x=True):
         eps_pred = self.model(x_t, self.timestep_map[t.long()], y=y)
         if self.sampling_var_type == 'learned':
             c = int(eps_pred.shape[1] / 2)
@@ -253,6 +268,18 @@ class Diffusion:
         mean = extract(self.posterior_mean_coef_x0, t, pred_x0.shape) * pred_x0 + extract(
             self.posterior_mean_coef_xt, t, x_t.shape) * x_t
 
+        # If we use classifier guidance, add to the mean the value: s * grad_{x_t}[log(classifier prob)]
+        # This is (Algorithm 1 in OpenAI paper)
+        if self.guidance == 'classifier':
+            assert y is not None, 'need label in order to use classifier!'
+            with torch.enable_grad():
+                x = x_t.detach().requires_grad_(True)
+                classifier_log_probs = torch.log_softmax(self.classifier(x), dim=-1)  # ADD T AS INPUT FOR NOISY CLASSIFIER
+                # Grab log probabilities of desired labels for each element of batch
+                grabbed = classifier_log_probs[range(classifier_log_probs.shape[0]), torch.flatten(y)]
+                grad = torch.autograd.grad(grabbed.sum(), x)[0]  # grad = grad_{x_t}[log(p[y | x_t, t])]
+                mean += self.strength * grad * torch.exp(log_var)
+
         # Return sample pred for x_0 using calculated mean and given log variance, evaluated at desired timestep
         # (Between eq. 11 and eq. 12 in DDPM paper)
         noise = torch.randn_like(x_t)
@@ -262,16 +289,27 @@ class Diffusion:
         sample = mean + mask * torch.exp(0.5 * log_var) * noise
         sample = sample.float()
 
-        if return_x0:
-            return sample, pred_x0
-        return sample
+        return sample, pred_x0
 
     # Implement denoising diffusion implicit models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
-    def ddim_denoising_step(self, x_t, t, y=None, return_x0=False, clip_x=True):
+    def ddim_denoising_step(self, x_t, t, y=None, clip_x=True):
         eps_pred = self.model(x_t, self.timestep_map[t.long()], y=y)
         if self.sampling_var_type == 'learned' or self.sampling_var_type == 'learned_range':
             c = int(eps_pred.shape[1] / 2)
             eps_pred, _ = torch.split(eps_pred, c, dim=1)
+
+        # If we use classifier guidance, subtract from eps_pred the value:
+        # s * sqrt(1 - alpha_bar) grad_{x_t}[log(classifier prob)]
+        # This is (Algorithm 2 in OpenAI paper)
+        if self.guidance == 'classifier':
+            assert y is not None, 'need label in order to use classifier!'
+            with torch.enable_grad():
+                x = x_t.detach().requires_grad_(True)
+                classifier_log_probs = torch.log_softmax(self.classifier(x), dim=-1)  # ADD T AS INPUT FOR NOISY CLASSIFIER
+                # Grab log probabilities of desired labels for each element of batch
+                grabbed = classifier_log_probs[range(classifier_log_probs.shape[0]), torch.flatten(y)]
+                grad = torch.autograd.grad(grabbed.sum(), x)[0]  # grad = grad_{x_t}[log(p[y | x_t, t])]
+                eps_pred -= self.strength * grad * extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
 
         # Same as in DDPM (eq. 11)
         pred_x0 = extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - extract(
@@ -281,12 +319,9 @@ class Diffusion:
 
         # Accelerated sampling of Generative Process (secs. 4.1 and 4.2 in DDIM)
         # (eq. 12 in DDIM)
-        eps_pred = (extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - pred_x0) / extract(
-            self.sqrt_reciprocal_alphas_minus_one_cumprod, t, x_t.shape)
         alpha_bar = extract(self.alphas_cumprod, t, x_t.shape)
         alpha_bar_prev = extract(self.alphas_cumprod_prev, t, x_t.shape)
         var = self.ddim_eta ** 2 * (1.0 - alpha_bar_prev) * (1.0 - alpha_bar / alpha_bar_prev) / (1.0 - alpha_bar)
-
         mean = pred_x0 * torch.sqrt(alpha_bar_prev) + torch.sqrt(1 - alpha_bar_prev - var) * eps_pred
 
         noise = torch.randn_like(x_t)
@@ -296,6 +331,4 @@ class Diffusion:
         sample = mean + mask * torch.sqrt(var) * noise
         sample = sample.float()
 
-        if return_x0:
-            return sample, pred_x0
-        return sample
+        return sample, pred_x0

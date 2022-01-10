@@ -12,8 +12,14 @@ DIFFUSION MODEL BASED ON THE FOLLOWING PAPERS AND CORRESPONDING WORK:
     - Song et al. Denoising Diffusion Implicit Models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
     - Dhariwal/Nichol Diffusion Model Beats GAN on Image Synthesis (OpenAI): https://arxiv.org/pdf/2105.05233.pdf
     
-    Model architecture closely follows DDPM's and OpenAI's, implementation largely same with some modifications for 
-    clarity, convenience, and a different attention implementation. 
+    Model is a UNet architecture (https://arxiv.org/pdf/1505.04597.pdf). From OpenAI paper:
+    "The UNet model uses a stack of residual layers and downsampling convolutions, followed by a stack of 
+    residual layers with upsampling convolutions, with skip connections connecting the layers with the same 
+    spatial size." and
+    "In the rest of the paper, we use this final improved model architecture as our default: variable width with 2 
+    residual blocks per resolution, multiple heads with 64 channels per head, attention at 32, 16 and 8 resolutions, 
+    BigGAN residual blocks for up and downsampling, and adaptive group normalization for injecting timestep and 
+    class embeddings into residual blocks."
     
     I will also add classifier-dependent and classifier-free guidance as per Ho/Salismans
     https://openreview.net/pdf/ea628d03c92a49b54bc2d757d209e024e7885980.pdf once I get around to it :)
@@ -118,18 +124,18 @@ class ResidualBlock(UsesSteps):
             - downsample (bool): whether to downsample before first convolution
             - use_conv (bool): if out_channels != in_channels and this is True, use 3x3 convolution to
             - change number of channels
-            - use_scale_shift_norm (bool): whether to use step embedding to scale and shift input or simply add them
+            - use_adaptive_gn (bool): whether to use step embedding to scale and shift input or simply add them
             - dropout (double): dropout probability
 
         Returns:
             - An nn.Module to be used to compose a network.
     """
     def __init__(self, in_channels, step_channels, dropout, upsample=False, downsample=False,
-                 use_conv=False, out_channels=None, use_scale_shift_norm=False):
+                 use_conv=False, out_channels=None, use_adaptive_gn=False):
         super(ResidualBlock, self).__init__()
 
         self.use_conv = use_conv
-        self.use_scale_shift_norm = use_scale_shift_norm
+        self.use_adaptive_gn = use_adaptive_gn
         self.silu = nn.SiLU()
         out_channels = out_channels if out_channels is not None else in_channels
 
@@ -162,7 +168,7 @@ class ResidualBlock(UsesSteps):
         self.out_norm = nn.GroupNorm(num_groups=32, num_channels=out_channels, eps=1e-5)
         self.out_conv = zero_module(nn.Conv2d(in_channels=out_channels, out_channels=out_channels,
                                               kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))
-        if use_scale_shift_norm:
+        if use_adaptive_gn:
             self.step_embedding = nn.Linear(step_channels, 2 * out_channels)
         else:
             self.step_embedding = nn.Linear(step_channels, out_channels)
@@ -178,9 +184,11 @@ class ResidualBlock(UsesSteps):
 
         # add in timestep embedding
         embedding = self.step_embedding(self.silu(step))[:, :, None, None]
-        # apply scale-shift norm
-        if self.use_scale_shift_norm:
+        # apply Adaptive GroupNorm (scale-shift norm) from (sec. 3 of OpenAI paper)
+        if self.use_adaptive_gn:
+            # [y_s, y_b] = y
             scale, shift = torch.chunk(embedding, 2, dim=1)
+            # AdaGN(h, y) = y_s * GroupNorm(h) + y_b
             h = self.out_norm(h) * (1 + scale) + shift
         else:
             h += embedding
@@ -269,7 +277,7 @@ class DiffusionModel(nn.Module):
             - num_classes (int): if not None, number of classes to use for class-conditional models
             - num_heads (int): number of heads to use for AttentionBlocks
             - num_head_channels (int): number of channels to use for each head for AttentionBlocks, supersedes num_heads
-            - use_scale_shift_norm (bool): whether to use scale and shift norm with step embeddings in ResidualBlocks
+            - use_adaptive_gn (bool): whether to use Adaptive GroupNorm with step & class embeddings in ResidualBlocks
             - dropout (double): dropout probability in the ResidualBlocks
 
         Returns:
@@ -290,7 +298,7 @@ class DiffusionModel(nn.Module):
             num_heads=1,
             num_head_channels=None,
             resblock_updown=False,
-            use_scale_shift_norm=False
+            use_adaptive_gn=False
     ):
         super(DiffusionModel, self).__init__()
         self.resolution = resolution
@@ -325,7 +333,7 @@ class DiffusionModel(nn.Module):
                 # num_res_blocks residual blocks per level, plus an attention layer if specified
                 layers = [ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim, dropout=dropout,
                                         out_channels=int(model_channels * mult),
-                                        use_scale_shift_norm=use_scale_shift_norm)]
+                                        use_adaptive_gn=use_adaptive_gn)]
                 curr_channels = int(model_channels * mult)
 
                 # Add attention layer if specified to be added at this downsampling
@@ -344,7 +352,7 @@ class DiffusionModel(nn.Module):
                     self.downsampling.append(UsesStepsSequential(
                         ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim, dropout=dropout,
                                       out_channels=output_channels, downsample=True,
-                                      use_scale_shift_norm=use_scale_shift_norm)))
+                                      use_adaptive_gn=use_adaptive_gn)))
                 else:
                     self.downsampling.append(UsesStepsSequential(
                         Downsample(in_channels=curr_channels, out_channels=output_channels, with_conv=conv_resample)))
@@ -355,11 +363,11 @@ class DiffusionModel(nn.Module):
 
         # Middle blocks - residual, attention, residual
         layers = [ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim,
-                                dropout=dropout, use_scale_shift_norm=use_scale_shift_norm),
+                                dropout=dropout, use_adaptive_gn=use_adaptive_gn),
                   AttentionBlock(channels=curr_channels,
                                  num_heads=num_heads, num_head_channels=num_head_channels),
                   ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim, dropout=dropout,
-                                use_scale_shift_norm=use_scale_shift_norm)]
+                                use_adaptive_gn=use_adaptive_gn)]
         self.middle_block = UsesStepsSequential(*layers)
         self._feature_size += curr_channels
 
@@ -370,7 +378,7 @@ class DiffusionModel(nn.Module):
             for i in range(num_res_blocks + 1):
                 skip_channels = input_block_channels.pop()
                 layers = [ResidualBlock(in_channels=curr_channels + skip_channels,  # append for skip connections
-                                        step_channels=step_embed_dim, use_scale_shift_norm=use_scale_shift_norm,
+                                        step_channels=step_embed_dim, use_adaptive_gn=use_adaptive_gn,
                                         dropout=dropout, out_channels=int(model_channels * mult))]
                 curr_channels = int(model_channels * mult)
                 if curr_res in attention_resolutions:
@@ -383,7 +391,7 @@ class DiffusionModel(nn.Module):
                     if resblock_updown:
                         layers.append(ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim,
                                                     dropout=dropout, out_channels=output_channels,
-                                                    upsample=True, use_scale_shift_norm=use_scale_shift_norm))
+                                                    upsample=True, use_adaptive_gn=use_adaptive_gn))
                     else:
                         layers.append(Upsample(in_channels=curr_channels, out_channels=output_channels,
                                                with_conv=conv_resample))
@@ -447,128 +455,3 @@ def timestep_embedding(timesteps, embedding_dim, max_period=10000):
     if embedding_dim % 2 == 1:
         emb = F.pad(emb, (0, 1, 0, 0))
     return emb
-
-
-# ---------------------------------------------------------------------------------------------------------------------
-# ---------------------------------------------------------------------------------------------------------------------
-# ---------------------------------------------------------------------------------------------------------------------
-
-import matplotlib.pyplot as plt
-from collections import OrderedDict
-from diffusion import Diffusion
-
-
-# Show image (img must be RGB and from [0.0, 1.0] or [0, 255])
-def imshow(img, title=None):
-    plt.imshow(img)
-    if title is not None:
-        plt.title(title)
-    plt.pause(0.001)
-
-
-# convert state dict from the ones from guided_diffusion to one compatible with my model, doesn't change sd
-def convert_state_dict(sd):
-    def convert_param_name(name):
-        name = name.replace('input_blocks', 'downsampling')
-        name = name.replace('output_blocks', 'upsampling')
-        name = name.replace('in_layers.0', 'in_norm')
-        name = name.replace('in_layers.2', 'in_conv')
-        name = name.replace('emb_layers.1', 'step_embedding')
-        name = name.replace('out_layers.0', 'out_norm')
-        name = name.replace('out_layers.3', 'out_conv')
-        name = name.replace('skip_connection', 'skip')
-        name = name.replace('time_embed', 'step_embed')
-        name = name.replace('qkv', 'qkv_nin')
-        name = name.replace('label_emb', 'class_embedding')
-        return name
-
-    new_sd = OrderedDict()
-    for _ in range(len(sd)):
-        key, val = sd.popitem(False)
-        old_key = key
-        key = convert_param_name(key)
-        sd[old_key] = val
-        new_sd[key] = val
-
-    return new_sd
-
-
-# ---------------------------------------------------------------------------------------------------------------------
-# HYPERPARAMETERS
-# ---------------------------------------------------------------------------------------------------------------------
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-
-# device = torch.device('cpu')
-# torch.manual_seed(0)
-
-STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
-DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 1.0}
-BATCH_SIZE = 1
-NUM_SAMPLES = 1
-SHOW_PROGRESS = True
-# ---------------------------------------------------------------------------------------------------------------------
-
-# CREATE MODEL
-if STATE_DICT_FILENAME == 'models/64x64_diffusion.pt':
-    CONDITIONAL = True
-    DIFF_ARGS = {'beta_schedule': 'cosine', 'sampling_var_type': 'learned_range', 'device': device}
-    MODEL_ARGS = {'resolution': 64, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 2, 3, 4),
-                  'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 192,
-                  'num_res_blocks': 3,
-                  'resblock_updown': True, 'use_scale_shift_norm': True, 'num_classes': 1000 if CONDITIONAL else None}
-elif STATE_DICT_FILENAME == 'diff256.pt':
-    CONDITIONAL = False
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_range', 'device': device}
-    MODEL_ARGS = {'resolution': 256, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 1, 2, 2, 4, 4),
-                  'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 256,
-                  'num_res_blocks': 2,
-                  'resblock_updown': True, 'use_scale_shift_norm': True, 'num_classes': 1000 if CONDITIONAL else None}
-elif STATE_DICT_FILENAME == 'cifar.pt':
-    CONDITIONAL = False
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'small', 'device': device}
-    MODEL_ARGS = {'resolution': 32, 'attention_resolutions': (16,), 'channel_mult': (1, 2, 2, 2),
-                  'num_heads': 1, 'in_channels': 3, 'out_channels': 3, 'model_channels': 128,
-                  'num_res_blocks': 2,
-                  'resblock_updown': False, 'use_scale_shift_norm': False, 'num_classes': 1000 if CONDITIONAL else None}
-else:
-    raise NotImplementedError(STATE_DICT_FILENAME)
-
-model = DiffusionModel(**MODEL_ARGS)
-model.load_state_dict(convert_state_dict(torch.load(STATE_DICT_FILENAME, map_location="cpu")), strict=True)
-model.to(device).eval()
-
-print('Model made from {} with {} parameters! :)\n'.
-      format(STATE_DICT_FILENAME, sum(p.numel() for p in model.parameters())))
-
-print('Starting Diffusion! There are {} samples of {} images each\n'.format(NUM_SAMPLES, BATCH_SIZE))
-samples = []
-DIFFUSION_ARGS.update(DIFF_ARGS)
-diffusion = Diffusion(model=model, **DIFFUSION_ARGS)
-for i_sample in range(1, NUM_SAMPLES + 1):
-    # CREATE RANDOM DATA
-    data = torch.randn([BATCH_SIZE, 3, MODEL_ARGS['resolution'], MODEL_ARGS['resolution']]).to(device)
-    labels = torch.randint(low=0, high=1000, size=(BATCH_SIZE,), device=device) if CONDITIONAL else None
-
-    # RUN DIFFUSION
-    print('Denoising sample {}! :)'.format(i_sample))
-    out = diffusion.denoise(x=data, label=labels, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS)
-
-    # Convert from [-1.0, 1.0] to [0, 255]
-    out = ((out + 1) * 127.5).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)
-    data = data.cpu().permute(0, 2, 3, 1).detach().numpy()
-    out = out.cpu().detach().numpy()
-
-    samples.append((data, out))
-    print()
-
-print('Displaying {} generated images!'.format(NUM_SAMPLES * BATCH_SIZE))
-for sample in samples:
-    data, out = sample
-    for b in range(BATCH_SIZE):
-        plt.close('all')
-        fig = plt.figure(figsize=(7, 3))
-        fig.add_subplot(1, 2, 1)
-        imshow(data[b], title='Input Noise')
-        fig.add_subplot(1, 2, 2)
-        imshow(out[b], title='Output Image')
-        plt.waitforbuttonpress()
