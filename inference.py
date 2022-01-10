@@ -2,46 +2,12 @@ import os
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
-import torchvision.models as models
 import random
 import torchvision.transforms as transforms
 
-from transfer_network import StyleTransfer
-
-
-class Flatten(nn.Module):
-    def __init__(self):
-        super(Flatten, self).__init__()
-
-    def forward(self, x):
-        return x.view(x.size(0), -1)
-
-
-class AdaptiveConcatPool2d(nn.Module):
-    def __init__(self, size=None):
-        super(AdaptiveConcatPool2d, self).__init__()
-        sz = size or 1
-        self.ap = nn.AdaptiveAvgPool2d(sz)
-        self.mp = nn.AdaptiveMaxPool2d(sz)
-
-    def forward(self, x):
-        return torch.cat([self.mp(x), self.ap(x)], 1)
-
-
-class Normalize:
-    def __init__(self, mean, std, inplace=False, dtype=torch.float):
-        self.mean = torch.as_tensor(mean, dtype=dtype)[None, :, None, None]
-        self.std = torch.as_tensor(std, dtype=dtype)[None, :, None, None]
-        self.inplace = inplace
-
-    def __call__(self, tensor):
-        if not self.inplace:
-            tensor = tensor.clone()
-
-        tensor.sub_(self.mean).div_(self.std)
-        return tensor
+from cnn import StyleTransfer
+from classifier import ArtistClassifier
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,7 +25,7 @@ STYLE_METHOD = 'random'
 ARTIST = 'Pablo_Picasso'
 
 model_dir = 'models/' + ARTIST + '/' + STYLE_METHOD + '/'
-MANUAL_MODEL_FILENAME = None  # If this is None, automatically finds model filename with horrible if-else
+MODEL_FILENAME = None
 
 DISPLAY = True  # If DISPLAY, transform CONTENT_IMG and display results; if not, evaluate model outputs with classifier
 
@@ -86,105 +52,17 @@ RESIZE_SIZE = 1024
 NUM_IMAGES = 133  # Number of random content images to grab and evaluate classifier with
 # -------------------------------------------------------------------------------------------------------------------
 
-# Horrible coding practices to help automate the process of calling this function
-model_filename = MANUAL_MODEL_FILENAME
-if MANUAL_MODEL_FILENAME is None:
-    if ARTIST == 'Pablo_Picasso':
-        if STYLE_METHOD == 'average':
-            model_filename = 'transfer2_17-40_5.pth'
-        elif STYLE_METHOD == 'classifier':
-            model_filename = 'transfer2_17-1500000_33.pth'
-        elif STYLE_METHOD == 'cycle':
-            model_filename = 'transfer_17-35_24.pth'
-        elif STYLE_METHOD == 'random':
-            model_filename = 'Pablo_Picasso_transfer2_280.pth'
-        elif STYLE_METHOD == 'smartaverage':
-            print('invalid jawn')
-            exit()
-        else:
-            print('invalid jawn')
-            exit()
-    elif ARTIST == 'Leonardo_da_Vinci':
-        if STYLE_METHOD == 'average':
-            print('invalid jawn')
-            exit()
-        elif STYLE_METHOD == 'classifier':
-            model_filename = 'transfer_17-2000000_20.pth'
-        elif STYLE_METHOD == 'cycle':
-            model_filename = 'transfer_17-40_33.pth'
-        elif STYLE_METHOD == 'random':
-            model_filename = 'transfer_17-40_32.pth'
-        elif STYLE_METHOD == 'smartaverage':
-            model_filename = 'transfer_17-45_3.pth'
-        else:
-            print('invalid jawn')
-            exit()
-    elif ARTIST == 'Vincent_van_Gogh':
-        if STYLE_METHOD == 'average':
-            print('invalid jawn')
-            exit()
-        elif STYLE_METHOD == 'classifier':
-            model_filename = 'transfer_17-2000000_15.pth'
-        elif STYLE_METHOD == 'cycle':
-            model_filename = 'transfer_17-40_30.pth'
-        elif STYLE_METHOD == 'random':
-            model_filename = 'transfer2_17-40_30.pth'
-        elif STYLE_METHOD == 'smartaverage':
-            model_filename = 'transfer_17-45_10.pth'
-        else:
-            print('invalid jawn')
-            exit()
-    elif ARTIST == 'Rembrandt':
-        if STYLE_METHOD == 'average':
-            print('invalid jawn')
-            exit()
-        elif STYLE_METHOD == 'classifier':
-            model_filename = 'transfer_17-2000000_15.pth'
-        elif STYLE_METHOD == 'cycle':
-            model_filename = 'transfer_17-40_33.pth'
-        elif STYLE_METHOD == 'random':
-            model_filename = 'transfer_17-40_33.pth'
-        elif STYLE_METHOD == 'smartaverage':
-            print('invalid jawn')
-            exit()
-        else:
-            print('invalid jawn')
-            exit()
-    else:
-        print('invalid jawn')
-        exit()
-
 print('Preparing networks!')
-
-classifier = models.resnet50(pretrained=False)
-# Remove final layers and append the correct outputs
-modules = list(classifier.children())
-modules.pop(-1)
-modules.pop(-1)
-feature_layers = nn.Sequential(nn.Sequential(*modules))
-feature_children = list(feature_layers.children())
-# Append the layers we need (19 classes in this classifier)
-feature_children.append(nn.Sequential(
-    AdaptiveConcatPool2d(), Flatten(), nn.BatchNorm1d(4096), nn.Dropout(p=0.375), nn.Linear(4096, 512),
-    nn.ReLU(), nn.BatchNorm1d(512), nn.Dropout(p=0.75), nn.Linear(512, 19)
-))
-classifier = nn.Sequential(*feature_children)
-sd = torch.load('models/best-2.pth', map_location=device)
-classifier.load_state_dict(sd['model'], strict=True)
-for param in classifier.parameters():
-    param.requires_grad = False
-classifier = classifier.double().to(device)
-classifier.eval()
-
 transform = transforms.Compose([
     transforms.ToTensor(), transforms.CenterCrop(256),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-net = StyleTransfer().double()
-net.load_state_dict(torch.load(model_dir + model_filename, map_location=device),
-                    strict=True)  # 'transfer_17-35_24.pth'
-net = net.double().to(device)
+classifier = ArtistClassifier(state_dict_filename='models/best-2.pth', num_classes=19, device=device)
+classifier.eval()
+if MODEL_FILENAME is None or not os.listdir(model_dir).__contains__(MODEL_FILENAME):
+    raise NotImplementedError(MODEL_FILENAME)
+net = StyleTransfer(state_dict_filename=model_dir + MODEL_FILENAME, device=device)
 net.eval()
 
 index = artists.index(ARTIST)
@@ -212,7 +90,7 @@ else:
         if RESIZE_IMGS:
             content_images.append(cv2.resize(im, (RESIZE_SIZE, RESIZE_SIZE)))
         else:
-            # If image is too big, resize so large dimension is 1024
+            # If image is a weird size, ignore it
             h, w, c = im.shape
             if h > 1600 or w > 1024 or h < 224 or w < 224:
                 continue

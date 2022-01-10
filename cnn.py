@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 
@@ -7,7 +8,9 @@ import torch.nn as nn
 
 # Code itself was adapted from implementation in: https://github.com/rrmina/fast-neural-style-pytorch
 class StyleTransfer(nn.Module):
-    def __init__(self):
+    def __init__(self, state_dict_filename=None, device=None):
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         super(StyleTransfer, self).__init__()
         self.ConvBlock = nn.Sequential(
             ConvLayer(3, 32, 9, 1),
@@ -35,6 +38,9 @@ class StyleTransfer(nn.Module):
             nn.ReLU(),
             ConvLayer(32, 3, 9, 1, norm="None")
         )
+        if state_dict_filename is not None:
+            self.load_state_dict(torch.load(state_dict_filename, map_location=device), strict=True)
+        self.double().to(device)
 
     def forward(self, x):
         x = self.ConvBlock(x)

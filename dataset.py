@@ -114,7 +114,7 @@ def get_content_dataset(size, rescale_height, rescale_width):
 # Script to load dataset of paintings (BGR, CxHxW, [0.0, 1.0]) with artist labels (from 0 to 49) if for_classifier==True
 # If not, returns dictionary where artist is the key and the value is a list of all the paintings belonging to that
 # artist as BGR tensors of shape (C x H x W) with values from [0, 255].
-# Call with save_pickle=True and load_pickle=False to load from the datset directly, and call with load_pickle=True
+# Call with load_pickle=False to load from the dataset directly, and call with load_pickle=True
 # to load from pre-saved dictionaries for faster loading
 # Rescales paintings to (rescale_height x rescale_width) if specified, rescales to average dimensions // 2 if not
 def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-1, use_resized=True,
@@ -227,4 +227,3 @@ def get_painting_dataset(for_classifier=True, rescale_height=-1, rescale_width=-
                              target_height=target_height, target_width=target_width).transpose((2, 0, 1))
                 dataset[artist][i] = torch.from_numpy(im).view(3, target_height, target_width)
         return dataset
-

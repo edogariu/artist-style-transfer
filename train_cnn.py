@@ -10,6 +10,7 @@ import random
 import time
 
 from cnn import StyleTransfer
+from classifier import ArtistClassifier
 from dataset import get_content_dataset, get_painting_dataset, get_avg_dataset
 
 # Acknowledgements:
@@ -78,31 +79,15 @@ class VGG16(nn.Module):
 
 
 # ------------------------------------------------------------------------------------------------------------------
-# CLASSES THAT MIGHT ALREADY EXIST BUT WE INEXPLICABLY NEEDED TO REWRITE TO GET CLASSIFIER WORKING.
+# USEFUL METHODS
 # ------------------------------------------------------------------------------------------------------------------
-class Flatten(nn.Module):
-    def __init__(self):
-        super(Flatten, self).__init__()
-
-    def forward(self, x):
-        return x.view(x.size(0), -1)
-
-
-class AdaptiveConcatPool2d(nn.Module):
-    def __init__(self, size=None):
-        super(AdaptiveConcatPool2d, self).__init__()
-        sz = size or 1
-        self.ap = nn.AdaptiveAvgPool2d(sz)
-        self.mp = nn.AdaptiveMaxPool2d(sz)
-
-    def forward(self, x):
-        return torch.cat([self.mp(x), self.ap(x)], 1)
-
-
+# Normalizes images using mean and standard deviation
 class Normalize:
-    def __init__(self, mean, std, inplace=False, dtype=torch.float, dev=device):
-        self.mean = torch.as_tensor(mean, dtype=dtype, device=dev)[None, :, None, None]
-        self.std = torch.as_tensor(std, dtype=dtype, device=dev)[None, :, None, None]
+    def __init__(self, mean, std, inplace=False, device=None, dtype=torch.float):
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.mean = torch.as_tensor(mean, dtype=dtype, device=device)[None, :, None, None]
+        self.std = torch.as_tensor(std, dtype=dtype, device=device)[None, :, None, None]
         self.inplace = inplace
 
     def __call__(self, tensor):
@@ -113,9 +98,6 @@ class Normalize:
         return tensor
 
 
-# ------------------------------------------------------------------------------------------------------------------
-# USEFUL METHODS
-# ------------------------------------------------------------------------------------------------------------------
 # Calculates Gram Matrix gram(f) = f^-T * f of a batch of 2-D matrices
 # Can be thought of as the statistical overlap, and is often used in CNNs to capture texture information of responses
 def gram(f):
@@ -169,27 +151,10 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
     random.seed(seed)
 
     # Load networks
-    transfer = StyleTransfer().double().to(device)
+    transfer = StyleTransfer(device=device)
     if style_method == 'classifier':
         VGG = VGG16(just_content=True).double().to(device)
-        classifier = models.resnet50(pretrained=False)
-        # Remove final layers and append the correct outputs
-        modules = list(classifier.children())
-        modules.pop(-1)
-        modules.pop(-1)
-        feature_layers = nn.Sequential(nn.Sequential(*modules))
-        feature_children = list(feature_layers.children())
-        # Append the layers we need (19 classes in this classifier)
-        feature_children.append(nn.Sequential(
-            AdaptiveConcatPool2d(), Flatten(), nn.BatchNorm1d(4096), nn.Dropout(p=0.375), nn.Linear(4096, 512),
-            nn.ReLU(), nn.BatchNorm1d(512), nn.Dropout(p=0.75), nn.Linear(512, 19)
-        ))
-        classifier = nn.Sequential(*feature_children)
-        sd = torch.load('models/best-2.pth')
-        classifier.load_state_dict(sd['model'], strict=True)
-        for param in classifier.parameters():
-            param.requires_grad = False
-        classifier = classifier.double().to(device)
+        classifier = ArtistClassifier(state_dict_filename='models/best-2.pth', num_classes=19, device=device)
         classifier.eval()
     else:
         VGG = VGG16().double().to(device)
@@ -304,7 +269,7 @@ def train(style_method=STYLE_METHOD, artist=ARTIST, num_epochs=NUM_EPOCHS, batch
             view(batch_size).to(device, dtype=torch.long)
         print('Labels:\t', labels)
         CrossEntropyLoss = nn.CrossEntropyLoss().to(device)
-        normalize = Normalize(mean=[0.485, 0.546, 0.406], std=[0.229, 0.224, 0.225], dev=device)
+        normalize = Normalize(mean=[0.485, 0.546, 0.406], std=[0.229, 0.224, 0.225], device=device)
     else:
         print('enter valid style method!')
         return 0
