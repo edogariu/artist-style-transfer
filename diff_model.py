@@ -20,9 +20,6 @@ DIFFUSION MODEL BASED ON THE FOLLOWING PAPERS AND CORRESPONDING WORK:
     residual blocks per resolution, multiple heads with 64 channels per head, attention at 32, 16 and 8 resolutions, 
     BigGAN residual blocks for up and downsampling, and adaptive group normalization for injecting timestep and 
     class embeddings into residual blocks."
-    
-    I will also add classifier-dependent and classifier-free guidance as per Ho/Salismans
-    https://openreview.net/pdf/ea628d03c92a49b54bc2d757d209e024e7885980.pdf once I get around to it :)
 '''
 
 
@@ -431,6 +428,29 @@ class DiffusionModel(nn.Module):
                 x = torch.cat([x, xs.pop()], dim=1)
             x = module(x, embedding)
         return self.out(x)
+
+
+class SuperResolutionModel(DiffusionModel):
+    """
+    Diffusion model to perform Super Resolution of low-res image. Takes as input the low_res image in the forward pass.
+
+        Parameters:
+            - upscale_resolution (int): the resolution to upscale to
+            - in_channels (int): the number of channels in the input image. usually 3
+            - all of DiffusionModel's params
+
+            - low_res (torch.tensor): low-resolution image to upscale
+    """
+
+    def __init__(self, upscale_resolution, in_channels, **args):
+        super().__init__(upscale_resolution, in_channels * 2, **args)
+
+    def forward(self, x, timesteps, low_res=None, y=None):
+        assert low_res is not None, 'must pass low resolution image to SuperResolutionModel.forward'
+        _, _, new_height, new_width = x.shape
+        upsampled = F.interpolate(low_res, (new_height, new_width), mode="bilinear", align_corners=False)
+        x = torch.cat([x, upsampled], dim=1)
+        return super().forward(x, timesteps, y)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

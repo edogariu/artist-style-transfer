@@ -12,14 +12,14 @@ from classifier import ArtistClassifier
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 # device = torch.device('cpu')
-# torch.manual_seed(0)
+torch.manual_seed(0)
 
 STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
 DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
 
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 NUM_SAMPLES = 1
-DESIRED_LABELS = []  # set to list of labels (one for each sample) or [] for random label each sample
+DESIRED_LABELS = [300]  # set to list of labels (one for each sample) or [] for random label each sample
 
 SHOW_PROGRESS = True
 GUIDANCE = None  # can be None, 'classifier', or 'classifier_free'
@@ -117,7 +117,7 @@ for i_sample in range(NUM_SAMPLES):
 
     # RUN DIFFUSION
     print('Denoising sample {}! :)'.format(i_sample + 1))
-    out = diffusion.denoise(x=data, label=labels, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS)
+    out = diffusion.denoise(x=data, kwargs={'y': labels}, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS)
 
     # Convert from [-1.0, 1.0] to [0, 255]
     out = ((out + 1) * 127.5).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)

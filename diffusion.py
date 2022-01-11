@@ -9,6 +9,12 @@ DIFFUSION AND DENOISING UTILITIES BASED ON THE FOLLOWING PAPERS AND CORRESPONDIN
     - Song et al. Denoising Diffusion Implicit Models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
     - Dhariwal/Nichol Improved Denoising Diffusion Probabilistic Models (IDDPM): https://arxiv.org/pdf/2102.09672.pdf
     - Dhariwal/Nichol Diffusion Model Beats GAN on Image Synthesis (OpenAI): https://arxiv.org/pdf/2105.05233.pdf
+    - Ho/Salismans Classifier-Free Diffusion Guidance (CFDG): 
+                    https://openreview.net/pdf/ea628d03c92a49b54bc2d757d209e024e7885980.pdf
+                    
+possible improvements: 
+    - during sampling, denoise fully, then diffuse to step s, then denoise again starting from s
+    - truncate if using a CDM setup
 '''
 
 
@@ -86,6 +92,9 @@ class Diffusion:
         self.model.eval()
 
         self.guidance = guidance_method
+        if guidance_method != 'classifier' and guidance_method != 'classifier_free' and guidance_method is not None:
+            raise NotImplementedError(guidance_method)
+        assert guidance_method is None or self.model.conditional, 'can only use guidance if model is conditional'
         self.strength = guidance_strength
         self.classifier = classifier
         if self.classifier is not None:
@@ -174,14 +183,14 @@ class Diffusion:
             x = self.diffusion_step(x, t=timestep)
         return x
 
-    def denoise(self, x=None, label=None, start_step=None, steps_to_do=None, batch_size=1, progress=True):
+    def denoise(self, x=None, kwargs=None, start_step=None, steps_to_do=None, batch_size=1, progress=True):
         """
         Sample the posterior of the forward process in the diffusion Markov chain. If self.use_ddim is True, uses DDIM
         sampling instead of traditional DDPM sampling.
 
             Parameters:
                 - x (torch.tensor): if not None, input image x_t to denoise. if None, denoises Gaussian noise x_T
-                - label (torch.tensor): if model is class-conditional, tensor of label to use to guide denoising
+                - kwargs (dict): dict of extra args to pass to model, should be {'y': label}  with label to guide with
                 - start_step (int): which rescaled step to start at. should correspond to x's timestep
                 - steps_to_do (int): number of rescaled diffusion steps to apply forward
                 - batch_size (int): batch size of denoising process. only used if x is None
@@ -190,7 +199,10 @@ class Diffusion:
             Returns:
                 - Denoised sample(s).
         """
-        assert (label is not None) == self.model.conditional, 'pass label iff model is class-conditional'
+        if kwargs is None:
+            kwargs = {}
+        assert ('y' in kwargs.keys() and kwargs['y'] is not None) == self.model.conditional, \
+            'pass label iff model is class-conditional'
         with torch.no_grad():
             # If no specified starting step, start from x = x_T
             if start_step is None:
@@ -219,13 +231,13 @@ class Diffusion:
                 assert len(indices) == steps_to_do
                 for t in indices:
                     timestep = (t * torch.ones(x.shape[0])).to(self.device)
-                    x, x_0 = self.denoising_step(x, t=timestep, y=label)
+                    x, x_0 = self.denoising_step(x, t=timestep, kwargs=kwargs)
 
             else:  # DDIM SAMPLING
                 assert len(indices) == self.rescaled_num_steps
                 for t in indices:
                     timestep = (t * torch.ones(x.shape[0])).to(self.device)
-                    x, x_0 = self.ddim_denoising_step(x, t=timestep, y=label)
+                    x, x_0 = self.ddim_denoising_step(x, t=timestep, kwargs=kwargs)
         return x
 
     # -----------------------------------------------------------------------------------------------------------------
@@ -240,15 +252,13 @@ class Diffusion:
 
     # Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible x_{t-1}'s
     # If return_x0, also returns the predicted initial image x_0
-    def denoising_step(self, x_t, t, y=None, clip_x=True):
-        eps_pred = self.model(x_t, self.timestep_map[t.long()], y=y)
+    def denoising_step(self, x_t, t, kwargs=None, clip_x=True):
+        eps_pred = self.model(x_t, self.timestep_map[t.long()], **kwargs)
         if self.sampling_var_type == 'learned':
-            c = int(eps_pred.shape[1] / 2)
-            eps_pred, log_var = torch.split(eps_pred, c, dim=1)
+            eps_pred, log_var = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
         elif self.sampling_var_type == 'learned_range':
             assert self.log_posterior_var_clipped is not None and self.betas is not None
-            c = int(eps_pred.shape[1] / 2)
-            eps_pred, log_var = torch.split(eps_pred, c, dim=1)
+            eps_pred, log_var = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
 
             min_log = extract(self.log_posterior_var_clipped, t, x_t.shape)
             max_log = extract(np.log(self.betas), t, x_t.shape)
@@ -257,6 +267,16 @@ class Diffusion:
             log_var = frac * max_log + (1 - frac) * min_log
         else:
             log_var = extract(self.log_var, t, x_t.shape)
+
+        # If using classifier-free guidance, push eps_pred in the direction unique to its class and
+        # away from the base prediction (eq. 6 in CFDG paper):
+        # eps_pred(x_t, c) <- (1 + w) * eps_pred(x_t, c) - w * eps_pred(x_t, -1), where -1 is the null class
+        if self.guidance == 'classifier_free':
+            base_eps_pred = self.model(x_t, self.timestep_map[t.long()],
+                                       y=torch.tensor([-1] * eps_pred.shape[0], device=self.device))
+            if self.sampling_var_type == 'learned' or self.sampling_var_type == 'learned_range':
+                base_eps_pred, _ = torch.split(base_eps_pred, int(base_eps_pred.shape[1] / 2), dim=1)
+            eps_pred = (1 + self.strength) * eps_pred - self.strength * base_eps_pred
 
         # Predict x_start from x_t and epsilon (eq. 11 in DDPM paper)
         pred_x0 = extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - extract(
@@ -271,12 +291,11 @@ class Diffusion:
         # If we use classifier guidance, add to the mean the value: s * grad_{x_t}[log(classifier prob)]
         # This is (Algorithm 1 in OpenAI paper)
         if self.guidance == 'classifier':
-            assert y is not None, 'need label in order to use classifier!'
             with torch.enable_grad():
                 x = x_t.detach().requires_grad_(True)
                 classifier_log_probs = torch.log_softmax(self.classifier(x), dim=-1)  # ADD T AS INPUT FOR NOISY CLASSIFIER
                 # Grab log probabilities of desired labels for each element of batch
-                grabbed = classifier_log_probs[range(classifier_log_probs.shape[0]), torch.flatten(y)]
+                grabbed = classifier_log_probs[range(classifier_log_probs.shape[0]), torch.flatten(kwargs['y'])]
                 grad = torch.autograd.grad(grabbed.sum(), x)[0]  # grad = grad_{x_t}[log(p[y | x_t, t])]
                 mean += self.strength * grad * torch.exp(log_var)
 
@@ -292,24 +311,31 @@ class Diffusion:
         return sample, pred_x0
 
     # Implement denoising diffusion implicit models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
-    def ddim_denoising_step(self, x_t, t, y=None, clip_x=True):
-        eps_pred = self.model(x_t, self.timestep_map[t.long()], y=y)
+    def ddim_denoising_step(self, x_t, t, kwargs=None, clip_x=True):
+        eps_pred = self.model(x_t, self.timestep_map[t.long()], **kwargs)
         if self.sampling_var_type == 'learned' or self.sampling_var_type == 'learned_range':
-            c = int(eps_pred.shape[1] / 2)
-            eps_pred, _ = torch.split(eps_pred, c, dim=1)
+            eps_pred, _ = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
 
         # If we use classifier guidance, subtract from eps_pred the value:
         # s * sqrt(1 - alpha_bar) grad_{x_t}[log(classifier prob)]
         # This is (Algorithm 2 in OpenAI paper)
         if self.guidance == 'classifier':
-            assert y is not None, 'need label in order to use classifier!'
             with torch.enable_grad():
                 x = x_t.detach().requires_grad_(True)
                 classifier_log_probs = torch.log_softmax(self.classifier(x), dim=-1)  # ADD T AS INPUT FOR NOISY CLASSIFIER
                 # Grab log probabilities of desired labels for each element of batch
-                grabbed = classifier_log_probs[range(classifier_log_probs.shape[0]), torch.flatten(y)]
+                grabbed = classifier_log_probs[range(classifier_log_probs.shape[0]), torch.flatten(kwargs['y'])]
                 grad = torch.autograd.grad(grabbed.sum(), x)[0]  # grad = grad_{x_t}[log(p[y | x_t, t])]
                 eps_pred -= self.strength * grad * extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
+        # If using classifier-free guidance, push eps_pred in the direction unique to its class and
+        # away from the base prediction (eq. 6 in CFDG paper):
+        # eps_pred(x_t, c) <- (1 + w) * eps_pred(x_t, c) - w * eps_pred(x_t, -1), where -1 is the null class
+        elif self.guidance == 'classifier_free':
+            base_eps_pred = self.model(x_t, self.timestep_map[t.long()],
+                                       y=torch.tensor([0] * eps_pred.shape[0], device=self.device))
+            if self.sampling_var_type == 'learned' or self.sampling_var_type == 'learned_range':
+                base_eps_pred, _ = torch.split(base_eps_pred, int(base_eps_pred.shape[1] / 2), dim=1)
+            eps_pred = (1 + self.strength) * eps_pred - self.strength * base_eps_pred
 
         # Same as in DDPM (eq. 11)
         pred_x0 = extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - extract(
