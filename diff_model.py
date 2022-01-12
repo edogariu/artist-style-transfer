@@ -1,10 +1,10 @@
 from abc import abstractmethod
+from collections import OrderedDict
 
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import math
-
 
 '''
 DIFFUSION MODEL BASED ON THE FOLLOWING PAPERS AND CORRESPONDING WORK:
@@ -61,6 +61,7 @@ class Upsample(nn.Module):
         Returns:
             - An nn.Module to be used to compose a network.
     """
+
     def __init__(self, in_channels, with_conv, out_channels=None):
         super(Upsample, self).__init__()
         self.with_conv = with_conv
@@ -89,6 +90,7 @@ class Downsample(nn.Module):
         Returns:
             - An nn.Module to be used to compose a network.
     """
+
     def __init__(self, in_channels, with_conv, out_channels=None):
         super(Downsample, self).__init__()
         self.with_conv = with_conv
@@ -127,6 +129,7 @@ class ResidualBlock(UsesSteps):
         Returns:
             - An nn.Module to be used to compose a network.
     """
+
     def __init__(self, in_channels, step_channels, dropout, upsample=False, downsample=False,
                  use_conv=False, out_channels=None, use_adaptive_gn=False):
         super(ResidualBlock, self).__init__()
@@ -212,6 +215,7 @@ class AttentionBlock(nn.Module):
         Returns:
             - An nn.Module to be used to compose a network.
     """
+
     def __init__(self, channels, num_heads=1, num_head_channels=None):
         super(AttentionBlock, self).__init__()
 
@@ -280,6 +284,7 @@ class DiffusionModel(nn.Module):
         Returns:
             - A UNet model to be used for diffusion.
     """
+
     def __init__(
             self,
             resolution,
@@ -404,7 +409,7 @@ class DiffusionModel(nn.Module):
                                                        kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))))
 
     def forward(self, x, timestep, y=None):
-        assert (y is not None) == self.conditional, 'don\'t give y unless class-conditional model'
+        assert (y is not None) == self.conditional, 'pass y iff class-conditional model'
         assert x.shape[2] == self.resolution and x.shape[3] == self.resolution, \
             'incorrect resolution: {}'.format(x.shape[2:])
 
@@ -475,3 +480,33 @@ def timestep_embedding(timesteps, embedding_dim, max_period=10000):
     if embedding_dim % 2 == 1:
         emb = F.pad(emb, (0, 1, 0, 0))
     return emb
+
+
+def convert_state_dict(sd):
+    """
+    Convert state dict from the ones from github.com/openai/guided-diffusion to one compatible with my model.
+    Does not change contents of input state_dict, returns new one.
+    """
+    def convert_param_name(name):
+        name = name.replace('input_blocks', 'downsampling')
+        name = name.replace('output_blocks', 'upsampling')
+        name = name.replace('in_layers.0', 'in_norm')
+        name = name.replace('in_layers.2', 'in_conv')
+        name = name.replace('emb_layers.1', 'step_embedding')
+        name = name.replace('out_layers.0', 'out_norm')
+        name = name.replace('out_layers.3', 'out_conv')
+        name = name.replace('skip_connection', 'skip')
+        name = name.replace('time_embed', 'step_embed')
+        name = name.replace('qkv', 'qkv_nin')
+        name = name.replace('label_emb', 'class_embedding')
+        return name
+
+    new_sd = OrderedDict()
+    for _ in range(len(sd)):
+        key, val = sd.popitem(False)
+        old_key = key
+        key = convert_param_name(key)
+        sd[old_key] = val
+        new_sd[key] = val
+
+    return new_sd

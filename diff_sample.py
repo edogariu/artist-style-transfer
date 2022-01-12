@@ -1,8 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
-from collections import OrderedDict
 
-from diff_model import DiffusionModel
+from diff_model import DiffusionModel, convert_state_dict
 from diffusion import Diffusion
 from classifier import ArtistClassifier
 
@@ -12,14 +11,14 @@ from classifier import ArtistClassifier
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 # device = torch.device('cpu')
-torch.manual_seed(0)
+# torch.manual_seed(0)
 
-STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
-DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
+STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
+DIFFUSION_ARGS = {'rescaled_num_steps': 250, 'original_num_steps': 1000, 'use_ddim': False, 'ddim_eta': 0.0}
 
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 NUM_SAMPLES = 1
-DESIRED_LABELS = [300]  # set to list of labels (one for each sample) or [] for random label each sample
+DESIRED_LABELS = [445] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
 
 SHOW_PROGRESS = True
 GUIDANCE = None  # can be None, 'classifier', or 'classifier_free'
@@ -42,6 +41,15 @@ if STATE_DICT_FILENAME == 'models/64x64_diffusion.pt':
                   'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 192,
                   'num_res_blocks': 3,
                   'resblock_updown': True, 'use_adaptive_gn': True, 'num_classes': 1000 if CONDITIONAL else None}
+elif STATE_DICT_FILENAME == 'models/128x128_diffusion.pt':
+    CONDITIONAL = True
+    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_range', 'classifier': classifier,
+                 'guidance_method': GUIDANCE if CONDITIONAL else None, 'guidance_strength': GUIDANCE_STRENGTH,
+                 'device': device}
+    MODEL_ARGS = {'resolution': 128, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 1, 2, 3, 4),
+                  'num_heads': 4, 'in_channels': 3, 'out_channels': 6, 'model_channels': 256,
+                  'num_res_blocks': 2,
+                  'resblock_updown': True, 'use_adaptive_gn': True, 'num_classes': 1000 if CONDITIONAL else None}
 elif STATE_DICT_FILENAME == 'diff256.pt':
     CONDITIONAL = False
     DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_range', 'classifier': classifier,
@@ -62,33 +70,6 @@ elif STATE_DICT_FILENAME == 'cifar.pt':
                   'resblock_updown': False, 'use_adaptive_gn': False, 'num_classes': 1000 if CONDITIONAL else None}
 else:
     raise NotImplementedError(STATE_DICT_FILENAME)
-
-
-# convert state dict from the ones from guided_diffusion to one compatible with my model, doesn't change sd
-def convert_state_dict(sd):
-    def convert_param_name(name):
-        name = name.replace('input_blocks', 'downsampling')
-        name = name.replace('output_blocks', 'upsampling')
-        name = name.replace('in_layers.0', 'in_norm')
-        name = name.replace('in_layers.2', 'in_conv')
-        name = name.replace('emb_layers.1', 'step_embedding')
-        name = name.replace('out_layers.0', 'out_norm')
-        name = name.replace('out_layers.3', 'out_conv')
-        name = name.replace('skip_connection', 'skip')
-        name = name.replace('time_embed', 'step_embed')
-        name = name.replace('qkv', 'qkv_nin')
-        name = name.replace('label_emb', 'class_embedding')
-        return name
-
-    new_sd = OrderedDict()
-    for _ in range(len(sd)):
-        key, val = sd.popitem(False)
-        old_key = key
-        key = convert_param_name(key)
-        sd[old_key] = val
-        new_sd[key] = val
-
-    return new_sd
 
 
 model = DiffusionModel(**MODEL_ARGS)
