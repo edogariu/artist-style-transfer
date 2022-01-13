@@ -14,7 +14,7 @@ Learning the style of a whole artist instead of simply the style of a specified 
      
      
 ## In the works:
-  - Class-conditional guided Gaussian Diffusion model! 
+  - Class-conditional guided Gaussian Diffusion model! (see diff_model, diffusion, and diff_sample)
   - Eventually a class-conditional GAN
  
 ## Acknowledgements:
