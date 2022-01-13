@@ -211,12 +211,13 @@ class AttentionBlock(nn.Module):
             - num_heads (int): number of heads to use in Multi-Headed-Attention
             - num_head_channels (int): number of channels to use for each head. if not None, then this block uses
             (channels // num_head_channels) heads and ignores num_heads
+            - split_qkv_first (bool): whether to split qkv first or split heads first during attention
 
         Returns:
             - An nn.Module to be used to compose a network.
     """
 
-    def __init__(self, channels, num_heads=1, num_head_channels=None):
+    def __init__(self, channels, num_heads=1, num_head_channels=None, split_qkv_first=True):
         super(AttentionBlock, self).__init__()
 
         if num_head_channels is None:
@@ -227,6 +228,7 @@ class AttentionBlock(nn.Module):
             ), "channels {} is not divisible by num_head_channels {}".format(channels, num_head_channels)
             self.num_heads = channels // num_head_channels
 
+        self.split_qkv_first = split_qkv_first
         self.scale = (channels // self.num_heads) ** -0.5
 
         self.qkv_nin = nn.Conv1d(in_channels=channels, out_channels=3 * channels,
@@ -245,17 +247,29 @@ class AttentionBlock(nn.Module):
         x = x.reshape(B, C, -1)
         qkv = self.norm(x)
 
-        # Get q, k, v
-        qkv = self.qkv_nin(qkv).permute(0, 2, 1)  # b,c,hw -> b,hw,c
-        qkv = qkv.reshape(B, H * W, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)  # q/k/v.shape = b,num_heads,hw,c//num_heads
+        if self.split_qkv_first:
+            # Get q, k, v
+            qkv = self.qkv_nin(qkv).permute(0, 2, 1)  # b,c,hw -> b,hw,c
+            qkv = qkv.reshape(B, H * W, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)  # q/k/v.shape = b,num_heads,hw,c//num_heads
 
-        # w = softmax(q @ k / sqrt(d_k))
-        w = (q @ k.transpose(-2, -1)) * self.scale
-        w = torch.softmax(w, dim=-1)
+            # w = softmax(q @ k / sqrt(d_k))
+            w = (q @ k.transpose(2, 3)) * self.scale
+            w = torch.softmax(w, dim=-1)
 
-        # attention = w @ v
-        h = (w @ v).transpose(1, 2).reshape(B, H * W, C).permute(0, 2, 1)
+            # attention = w @ v
+            h = (w @ v).transpose(1, 2).reshape(B, H * W, C).permute(0, 2, 1)
+        else:
+            qkv = self.qkv_nin(qkv)  # b, 3 * c, hw
+            q, k, v = qkv.reshape(B * self.num_heads, 3 * C // self.num_heads, H * W).split(C // self.num_heads, dim=1)
+
+            # w = softmax(q @ k / sqrt(d_k))
+            w = q.transpose(1, 2) @ k * self.scale
+            w = torch.softmax(w, dim=2)
+
+            # h = w @ v
+            h = torch.einsum("bts,bcs->bct", w, v).reshape(B, -1, H * W)
+
         h = self.proj_out(h)
 
         return (h + x).reshape(B, C, H, W)
@@ -279,6 +293,7 @@ class DiffusionModel(nn.Module):
             - num_heads (int): number of heads to use for AttentionBlocks
             - num_head_channels (int): number of channels to use for each head for AttentionBlocks, supersedes num_heads
             - use_adaptive_gn (bool): whether to use Adaptive GroupNorm with step & class embeddings in ResidualBlocks
+            - split_qkv_first (bool): whether to split qkv first or split heads first during attention
             - dropout (double): dropout probability in the ResidualBlocks
 
         Returns:
@@ -300,7 +315,8 @@ class DiffusionModel(nn.Module):
             num_heads=1,
             num_head_channels=None,
             resblock_updown=False,
-            use_adaptive_gn=False
+            use_adaptive_gn=False,
+            split_qkv_first=True
     ):
         super(DiffusionModel, self).__init__()
         self.resolution = resolution
@@ -340,7 +356,7 @@ class DiffusionModel(nn.Module):
 
                 # Add attention layer if specified to be added at this downsampling
                 if curr_res in attention_resolutions:
-                    layers.append(AttentionBlock(channels=curr_channels,
+                    layers.append(AttentionBlock(channels=curr_channels, split_qkv_first=split_qkv_first,
                                                  num_heads=num_heads, num_head_channels=num_head_channels))
                 input_block_channels.append(curr_channels)
                 self.downsampling.append(UsesStepsSequential(*layers))
@@ -366,7 +382,7 @@ class DiffusionModel(nn.Module):
         # Middle blocks - residual, attention, residual
         layers = [ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim,
                                 dropout=dropout, use_adaptive_gn=use_adaptive_gn),
-                  AttentionBlock(channels=curr_channels,
+                  AttentionBlock(channels=curr_channels, split_qkv_first=split_qkv_first,
                                  num_heads=num_heads, num_head_channels=num_head_channels),
                   ResidualBlock(in_channels=curr_channels, step_channels=step_embed_dim, dropout=dropout,
                                 use_adaptive_gn=use_adaptive_gn)]
@@ -384,7 +400,7 @@ class DiffusionModel(nn.Module):
                                         dropout=dropout, out_channels=int(model_channels * mult))]
                 curr_channels = int(model_channels * mult)
                 if curr_res in attention_resolutions:
-                    layers.append(AttentionBlock(channels=curr_channels,
+                    layers.append(AttentionBlock(channels=curr_channels, split_qkv_first=split_qkv_first,
                                                  num_heads=num_heads, num_head_channels=num_head_channels))
 
                 # Upsample at each channel multiplier layer

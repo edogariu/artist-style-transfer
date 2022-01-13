@@ -67,8 +67,7 @@ class Diffusion:
             - guidance_method (str): method of denoising guidance to use -- None, 'classifier', or 'classifier_free'
             - classifier (nn.Module): if guidance_method == 'classifier', which classifier model to use
             - guidance_strength (double): if guidance_method is not None, controls strength of guidance method selected
-            - use_ddim (bool): whether to use DDIM sampling. if True, interpret rescaled_num_steps as number of DDIM
-              steps
+            - use_ddim (bool): whether to use DDIM sampling and interpret rescaled_num_steps as number of DDIM steps
             - ddim_eta (double): value to be used when performing DDIM
             - device (torch.device): if not None, which device to perform diffusion with
 
@@ -119,8 +118,8 @@ class Diffusion:
         # Rescale betas to match the number of rescaled diffusion steps with (eq. 19 in IDDPM)
         alphas = 1.0 - betas  # array of alpha_t for indices t
         alphas_cumprod = np.cumprod(alphas, axis=0)  # alphabar_t
-        rescaled_timesteps = list(range(0 + original_num_steps // (2 * rescaled_num_steps),
-                                        original_num_steps + original_num_steps // (2 * rescaled_num_steps),
+        rescaled_timesteps = list(range(-20 + original_num_steps // (2 * rescaled_num_steps),
+                                        original_num_steps + original_num_steps // (2 * rescaled_num_steps) - 20,
                                         original_num_steps // rescaled_num_steps))
         last_alpha_cumprod = 1.0
         new_betas = []
@@ -225,18 +224,14 @@ class Diffusion:
                 progress_bar = tqdm.tqdm
                 indices = progress_bar(reversed(indices), total=self.rescaled_num_steps)
             else:
-                indices = reversed(indices)
+                indices = list(reversed(indices))
 
-            if not self.use_ddim:  # NORMAL DDPM
-                assert len(indices) == steps_to_do
-                for t in indices:
-                    timestep = (t * torch.ones(x.shape[0])).to(self.device)
+            assert len(indices) == steps_to_do
+            for t in indices:
+                timestep = (t * torch.ones(x.shape[0])).to(self.device)
+                if not self.use_ddim:  # NORMAL DDPM
                     x, x_0 = self.denoising_step(x, t=timestep, kwargs=kwargs)
-
-            else:  # DDIM SAMPLING
-                assert len(indices) == self.rescaled_num_steps
-                for t in indices:
-                    timestep = (t * torch.ones(x.shape[0])).to(self.device)
+                else:  # DDIM SAMPLING
                     x, x_0 = self.ddim_denoising_step(x, t=timestep, kwargs=kwargs)
         return x
 
@@ -332,7 +327,7 @@ class Diffusion:
         # eps_pred(x_t, c) <- (1 + w) * eps_pred(x_t, c) - w * eps_pred(x_t, -1), where -1 is the null class
         elif self.guidance == 'classifier_free':
             base_eps_pred = self.model(x_t, self.timestep_map[t.long()],
-                                       y=torch.tensor([0] * eps_pred.shape[0], device=self.device))
+                                       y=torch.tensor([-1] * eps_pred.shape[0], device=self.device))
             if self.sampling_var_type == 'learned' or self.sampling_var_type == 'learned_range':
                 base_eps_pred, _ = torch.split(base_eps_pred, int(base_eps_pred.shape[1] / 2), dim=1)
             eps_pred = (1 + self.strength) * eps_pred - self.strength * base_eps_pred
