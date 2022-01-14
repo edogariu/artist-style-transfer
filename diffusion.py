@@ -340,11 +340,12 @@ class Diffusion:
 
     def loss(self, x_0, t, kwargs=None, noise=None):
         """
-        Returns training losses for training step involving batch x_0 and timestep t (and possible labels kwargs['y'],
-        where:
+        Returns training loss in units of bits per dimension for training step involving batch x_0 and timestep t
+        (and possible labels kwargs['y']), where:
             We diffuse x_0 to x_t, predict epsilon from x_t, and calculate loss compared to the applied noise either
             using MSE directly ('simple' loss), using KL-divergence on the resulting distributions of samples
             ('KL' loss), or a weighted sum of the two ('hybrid' loss).
+        x_0 and t (and possibly kwargs['y'] and noise) are expected to be tensors.
         """
         if kwargs is None:
             kwargs = {}
