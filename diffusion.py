@@ -19,39 +19,6 @@ possible improvements:
 '''
 
 
-# Returns schedule for desired noise variance at each timestep
-# Methods are linear, constant (uses beta_0), cosine (doesnt use beta_0 nor beta_T)
-def get_beta_schedule(schedule_method, beta_0, beta_T, num_steps):
-    if schedule_method == 'linear':
-        betas = np.linspace(beta_0, beta_T, num_steps, dtype=np.float64)
-    elif schedule_method == 'constant':
-        betas = beta_0 * np.ones(num_steps, dtype=np.float64)
-    elif schedule_method == 'cosine':  # from (eq. 17 of IDDPM)
-        # function f(t) described in (eq. 17 of IDDPM)
-        def f(t):
-            s = 0.008  # extra value to add to fraction to prevent singularity
-            return math.cos((t + s) / (1.0 + s) * math.pi / 2) ** 2
-
-        betas = []
-        for step in range(num_steps):
-            alphabar_t_minus_one = step / num_steps
-            alphabar_t = (step + 1) / num_steps
-            betas.append(min(1 - f(alphabar_t) / f(alphabar_t_minus_one), 0.999))  # clip beta to be <= 0.999
-        return np.array(betas)
-    else:
-        raise NotImplementedError("unimplemented variance scheduling method: {}".format(schedule_method))
-    return betas
-
-
-# Index into a (numpy array)'s elements with index t (tensor), returning a tensor that is broadcastable to shape
-def extract(a, t, broadcast_shape):
-    result = torch.gather(torch.from_numpy(a).to(t.device).float(), 0, t.long())
-    # Keep adding dimensions to results until right shape
-    while len(result.shape) < len(broadcast_shape):
-        result = result[..., None]
-    return result.expand(broadcast_shape)
-
-
 class Diffusion:
     """
     Creates an object to handle a diffusion chain and a reverse diffusion (denoising) chain, with or without DDIM
@@ -64,21 +31,22 @@ class Diffusion:
             - sampling_var_type (str): type of variance calculation -- 'small' or 'large' for fixed variances of given
               sizes, 'learned' (outputs log(var)) or 'learned_interpolation' (outputs interpolation value for log(var))
               for variances predicted by model
-            - loss_type (str): type of training loss calculation -- 'KL' or 'KL_rescaled' to use variational lower
-              bound, 'MSE' or 'MSE_rescaled' for raw MSE values (also uses KL or KL_rescaled, respectively, for vars)
+            - loss_type (str): type of training loss calculation -- 'simple' for simple MSE loss of prediction,
+              'KL' or 'KL_rescaled' for loss using variational lower bound, 'hybrid' for weighted
+              sum of simple and KL losses (note: KL is only used for learning vars in hybrid loss).
+              If sampling_var_type is fixed (i.e. 'small' or 'large'), you should only use 'simple' loss
             - beta_schedule (str): scheduling method for noise variances (betas) -- 'linear', 'constant', or 'cosine'
             - betas (np.array): alternative to beta_schedule where betas are directly supplied
             - guidance_method (str): method of denoising guidance to use -- None, 'classifier', or 'classifier_free'
             - classifier (nn.Module): if guidance_method == 'classifier', which classifier model to use
             - guidance_strength (double): if guidance_method is not None, controls strength of guidance method selected
-            - use_ddim (bool): whether to use DDIM sampling. if True, interpret rescaled_num_steps as number of DDIM
-              steps
+            - use_ddim (bool): whether to use DDIM sampling and interpret rescaled_num_steps as number of DDIM steps
             - ddim_eta (double): value to be used when performing DDIM
             - device (torch.device): if not None, which device to perform diffusion with
 
 
         Returns:
-            - Diffusion object to call .diffuse() or .denoise() with.
+            - Diffusion object to call .diffuse(), .denoise(), or .loss() with with.
     """
 
     def __init__(self, model,
@@ -116,7 +84,7 @@ class Diffusion:
         self.ddim_eta = ddim_eta
 
         if betas is None:
-            betas = get_beta_schedule(beta_schedule, 0.0001, 0.02, original_num_steps)
+            betas = get_beta_schedule(beta_schedule, original_num_steps, 0.0001, 0.02)
         else:
             assert len(betas) == original_num_steps, 'betas must be the right length!'
             betas = np.array(betas, dtype=np.float64)
@@ -124,8 +92,8 @@ class Diffusion:
         # Rescale betas to match the number of rescaled diffusion steps with (eq. 19 in IDDPM)
         alphas = 1.0 - betas  # array of alpha_t for indices t
         alphas_cumprod = np.cumprod(alphas, axis=0)  # alphabar_t
-        rescaled_timesteps = list(range(0 + original_num_steps // (2 * rescaled_num_steps),
-                                        original_num_steps + original_num_steps // (2 * rescaled_num_steps),
+        rescaled_timesteps = list(range(-20 + original_num_steps // (2 * rescaled_num_steps),
+                                        -20 + original_num_steps + original_num_steps // (2 * rescaled_num_steps),
                                         original_num_steps // rescaled_num_steps))
         last_alpha_cumprod = 1.0
         new_betas = []
@@ -233,19 +201,23 @@ class Diffusion:
         return x
 
     # -----------------------------------------------------------------------------------------------------------------
+    # Calculations for each step
+    # -----------------------------------------------------------------------------------------------------------------
 
     # Samples from q(x_t | x_0), i.e. applies t steps of noise to x_0
     def diffusion_step(self, x_0, t, noise=None):
         if noise is None:
-            noise = torch.randn_like(x_0)
+            noise = torch.randn_like(x_0).to(self.device)
         # (eq. 4 in DDPM paper)
         return extract(self.sqrt_alphas_cumprod, t, x_0.shape) * x_0 + extract(
             self.sqrt_one_minus_alphas_cumprod, t, x_0.shape) * noise
 
-    # Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible x_{t-1}'s
-    # If return_x0, also returns the predicted initial image x_0
-    def denoising_step(self, x_t, t, kwargs=None, clip_x=True):
+    def get_eps_and_log_var(self, x_t, t, kwargs):
+        """
+        Returns predicted epsilon and predicted (or fixed) log variance from model.
+        """
         eps_pred = self.model(x_t, self.timestep_map[t.long()], **kwargs)
+
         if self.sampling_var_type == VarType.LEARNED:
             eps_pred, log_var = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
         elif self.sampling_var_type == VarType.LEARNED_INTERPOLATION:
@@ -262,6 +234,12 @@ class Diffusion:
             log_var = np.log(np.maximum(self.posterior_variance, 1e-20))
         else:
             raise NotImplementedError(self.sampling_var_type)
+        return eps_pred, log_var
+
+    # Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible x_{t-1}'s
+    # If return_x0, also returns the predicted initial image x_0
+    def denoising_step(self, x_t, t, kwargs=None, clip_x=True):
+        eps_pred, log_var = self.get_eps_and_log_var(x_t, t, kwargs=kwargs)
 
         # If using classifier-free guidance, push eps_pred in the direction unique to its class and
         # away from the base prediction (eq. 6 in CFDG paper):
@@ -357,54 +335,53 @@ class Diffusion:
         return sample, pred_x0
 
     # -----------------------------------------------------------------------------------------------------------------
+    # Loss calculations
+    # -----------------------------------------------------------------------------------------------------------------
 
-    def losses(self, x_0, t, loss_type, kwargs=None, noise=None):
+    def loss(self, x_0, t, kwargs=None, noise=None):
         """
-        Returns training losses for training step involving batch x_0 and timestep t, where:
-            we diffuse x_0 to x_t, predict epsilon from x_t, and calculate loss compared to the applied noise
+        Returns training losses for training step involving batch x_0 and timestep t (and possible labels kwargs['y'],
+        where:
+            We diffuse x_0 to x_t, predict epsilon from x_t, and calculate loss compared to the applied noise either
+            using MSE directly ('simple' loss), using KL-divergence on the resulting distributions of samples
+            ('KL' loss), or a weighted sum of the two ('hybrid' loss).
         """
         if kwargs is None:
             kwargs = {}
         if noise is None:
-            noise = torch.randn_like(x_0)
+            noise = torch.randn_like(x_0).to(self.device)
 
         # Add t steps of noise to get x_t from x_0
         x_t = self.diffusion_step(x_0=x_0, t=t, noise=noise)
 
-        if loss_type == LossType.KL or loss_type == LossType.KL_RESCALED:
-            loss = self.variational_lower_bound(x_0, x_t, t, kwargs)
-            if loss_type == LossType.KL_RESCALED:
-                loss *= self.original_num_steps
+        # Get model outputs (eps_pred and either predicted or fixed log_var)
+        eps_pred, log_var = self.get_eps_and_log_var(x_t, t, kwargs=kwargs)
 
-    def variational_lower_bound(self, x_0, x_t, t, kwargs=None):
+        # Simple loss is MSE between predicted and actual noise (eq. 14 of DDPM)
+        if self.loss_type == LossType.SIMPLE:
+            loss = mean_flat((eps_pred - noise) ** 2)
+        # KL loss is KL-Divergence of predicted and actual Gaussian distributions
+        elif self.loss_type == LossType.KL or self.loss_type == LossType.KL_RESCALED:
+            loss = self.variational_lower_bound(x_0, x_t, t, eps_pred, log_var)
+            if self.loss_type == LossType.KL_RESCALED:
+                loss *= self.rescaled_num_steps
+        # Hybrid loss (eq. 16 of IDDPM paper) uses weighted sum of simple loss from (eq. 14 of DDPM)
+        # and KL-Divergence loss (with frozen gradients from eps_pred, only allowing updates coming from log_var)
+        else:
+            loss_simple = mean_flat((eps_pred - noise) ** 2)
+            eps_pred_detached = eps_pred.detach()  # ensure that loss_vlb doesn't backprop through eps_pred, only var
+            loss_vlb = self.variational_lower_bound(x_0, x_t, t, eps_pred_detached, log_var) * self.rescaled_num_steps
+            loss = loss_simple + 0.001 * loss_vlb
+        return loss
+
+    def variational_lower_bound(self, x_0, x_t, t, eps_pred, log_var):
         """
         Returns variational lower bound term in units of bits per dimension.
         """
-        if kwargs is None:
-            kwargs = {}
         # Get true mean and log_var of sampling distribution
         true_mean = extract(self.posterior_mean_coef_x0, t, x_0.shape) * x_0 + extract(
             self.posterior_mean_coef_xt, t, x_t.shape) * x_t
         true_log_var = extract(self.log_posterior_var_clipped, t, x_0.shape)
-
-        # Get model-predicted mean and log_var of sampling distribution
-        eps_pred = self.model(x_t, self.timestep_map[t.long()], **kwargs)
-        if self.sampling_var_type == VarType.LEARNED:
-            eps_pred, log_var = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
-        elif self.sampling_var_type == VarType.LEARNED_INTERPOLATION:
-            assert self.log_posterior_var_clipped is not None and self.betas is not None
-            eps_pred, log_var = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
-            # (eq. 15 in IDDPM paper)
-            min_log = extract(self.log_posterior_var_clipped, t, x_t.shape)
-            max_log = extract(np.log(self.betas), t, x_t.shape)
-            frac = (log_var + 1) / 2
-            log_var = frac * max_log + (1 - frac) * min_log
-        elif self.sampling_var_type == VarType.LARGE:
-            log_var = np.log(np.append(self.posterior_variance[1], self.betas[1:]))
-        elif self.sampling_var_type == VarType.SMALL:
-            log_var = np.log(np.maximum(self.posterior_variance, 1e-20))
-        else:
-            raise NotImplementedError(self.sampling_var_type)
 
         pred_x0 = extract(self.sqrt_reciprocal_alphas_cumprod, t, x_t.shape) * x_t - extract(
             self.sqrt_reciprocal_alphas_minus_one_cumprod, t, eps_pred.shape) * eps_pred
@@ -413,25 +390,124 @@ class Diffusion:
         mean = extract(self.posterior_mean_coef_x0, t, pred_x0.shape) * pred_x0 + extract(
             self.posterior_mean_coef_xt, t, x_t.shape) * x_t
 
-        # CALC KL DIVERGENCE of true_mean, true_log_var, mean, log_var to find output
-        kl = normal_kl(
-            true_mean, true_log_variance_clipped, out["mean"], out["log_variance"]
-        )
-        kl = mean_flat(kl) / np.log(2.0)
+        # Calculate KL-Divergence between N(true_mean, true_log_var) and N(mean, log_var) to find output
+        kl = kl_div(true_mean, true_log_var, mean, log_var)
+        kl = mean_flat(kl) / np.log(2.0)  # convert from nats to bits
 
-        decoder_nll = -discretized_gaussian_log_likelihood(
-            x_start, means=out["mean"], log_scales=0.5 * out["log_variance"]
-        )
-        assert decoder_nll.shape == x_start.shape
-        decoder_nll = mean_flat(decoder_nll) / np.log(2.0)
+        # Calculate negative log-likelihood of start image appearing in predicted distribution
+        nll = -log_likelihood(x_0, mean, log_var)
+        nll = mean_flat(nll) / np.log(2.0)  # convert from nats to bits
 
-        # At the first timestep return the decoder NLL,
-        # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
-        output = th.where((t == 0), decoder_nll, kl)
-        return output
+        # At the first timestep return the nll, otherwise return KL(q(x_{t-1}|x_t,x_0), p(x_{t-1}|x_t))
+        return torch.where((t == 0), nll, kl)
 
 
-# DEFINE KL DIVERGENCE HERE
+# ---------------------------------------------------------------------------------------------------------------------
+# Helper methods!
+# ---------------------------------------------------------------------------------------------------------------------
+
+def get_beta_schedule(schedule_method, num_steps, beta_0, beta_T):
+    """
+    Returns schedule for desired noise variance (beta) at each timestep.
+
+        Parameters:
+            - schedule_method (str): method to use for scheduling - either 'linear', 'constant', or 'cosine'
+            - num_steps (int): number of diffusion steps to create betas for (should be T)
+            - beta_0 (double): value to use for initial beta in linear method and constant beta in constant method
+            - beta_T (double): value to use for final beta in linear method
+        Returns:
+            - betas (np.array): array of size (num_steps,) of beta values to use at each step
+    """
+    if schedule_method == 'linear':
+        betas = np.linspace(beta_0, beta_T, num_steps, dtype=np.float64)
+    elif schedule_method == 'constant':
+        betas = beta_0 * np.ones(num_steps, dtype=np.float64)
+    elif schedule_method == 'cosine':  # from (eq. 17 of IDDPM)
+        # function f(t) described in (eq. 17 of IDDPM)
+        def f(t):
+            s = 0.008  # extra value to add to fraction to prevent singularity
+            return math.cos((t + s) / (1.0 + s) * math.pi / 2) ** 2
+
+        betas = []
+        for step in range(num_steps):
+            alphabar_t_minus_one = step / num_steps
+            alphabar_t = (step + 1) / num_steps
+            betas.append(min(1 - f(alphabar_t) / f(alphabar_t_minus_one), 0.999))  # clip beta to be <= 0.999
+        return np.array(betas)
+    else:
+        raise NotImplementedError("unimplemented variance scheduling method: {}".format(schedule_method))
+    return betas
+
+
+def extract(a, t, broadcast_shape):
+    """
+    Index into a's elements with index t, returning a tensor that is broadcastable to shape.
+
+            Parameters:
+            - a (np.array): array to index into
+            - t (torch.tensor): timestep tensor to use as index
+            - broadcast_shape (iterable): shape to make output tensor broadcastable to
+        Returns:
+            - result (torch.tensor): tensor of selected values from a, broadcastable with broadcast_shape
+    """
+    result = torch.gather(torch.from_numpy(a).to(t.device).float(), 0, t.long())
+    # Keep adding dimensions to results until right shape
+    while len(result.shape) < len(broadcast_shape):
+        result = result[..., None]
+    return result.expand(broadcast_shape)
+
+
+def kl_div(mean_1, log_var_1, mean_2, log_var_2):
+    """
+    Returns KL-Divergence between two Gaussian's with given parameters.
+    Expects tensor inputs and returns tensor output for use in loss functions.
+    Output is measured in nats (log base e).
+    """
+    # Formula is KL(p,q) = log(sigma2/sigma1) + (sigma1^2+(mu1-mu2)^2)/(2sigma2^2) - 1/2
+    #                    = log(var2/var1)/2 + var1/2var2 + (mu1-mu2)^2/2sigma2^2 - 1/2
+    return ((log_var_2 - log_var_1) + torch.exp(log_var_1 - log_var_2) +
+            ((mean_1 - mean_2) ** 2) * torch.exp(-log_var_2) - 1.0) / 2
+
+
+def approx_cdf(x):
+    """
+    Returns approximate value of cdf(x) for the Gaussian with zero mean and unit variance. x can be a tensor.
+    Approximation is from:
+    "Page, E. (1977). Approximations to the cumulative normal function and its inverse for use on a pocket calculator."
+    """
+    y = math.sqrt(2.0 / math.pi) * (x + 0.0444715 * (x ** 3))
+    return 0.5 * (1.0 + torch.tanh(y))
+
+
+def log_likelihood(target, mean, log_var):
+    """
+    Returns log-likelihood of Gaussian with given mean and log variance, discretized to target image.
+    Expects tensor inputs and returns tensor output for use in loss functions.
+    target should be an image with values in [-1.0, 1.0]
+    Output is measured in nats (log base e).
+    """
+    assert target.shape == mean.shape == log_var.shape
+    std_recip = torch.exp(-0.5 * log_var)
+    centered = target - mean
+
+    # calculate z-scores of discretized steps to target image
+    plus = (centered + 1.0 / 255.0) * std_recip
+    minus = (centered - 1.0 / 255.0) * std_recip
+    cdf_minus, cdf_plus = approx_cdf(minus), approx_cdf(plus)
+    cdf_delta = cdf_plus - cdf_minus
+
+    # calculate log probabilities (we ensure that cdfs are not smaller than 1e-12 before taking log)
+    log_cdf_plus = torch.log(cdf_plus.clamp(min=1e-12))
+    log_one_minus_cdf_minus = torch.log((1.0 - cdf_minus).clamp(min=1e-12))
+    return torch.where(target < -0.999, log_cdf_plus,
+                       torch.where(target > 0.999, log_one_minus_cdf_minus, torch.log(cdf_delta.clamp(min=1e-12))))
+
+
+def mean_flat(tensor):
+    """
+    Takes mean over all the non-batch dimensions of the tensor.
+    """
+    return torch.mean(tensor, dim=list(range(1, len(tensor.shape))))
 
 
 class VarType(enum.Enum):
@@ -455,20 +531,20 @@ class VarType(enum.Enum):
 
 
 class LossType(enum.Enum):
-    MSE = enum.auto()  # use raw MSE loss (and KL when learning variances)
-    MSE_RESCALED = enum.auto()  # use raw MSE loss (with RESCALED_KL when learning variances)
+    SIMPLE = enum.auto()  # use raw MSE loss between eps_pred and applied noise
     KL = enum.auto()  # use the variational lower-bound
     KL_RESCALED = enum.auto()  # like KL, but rescale to estimate the full VLB
+    HYBRID = enum.auto()  # use weighted sum of SIMPLE for learning eps_pred and KL for learning variances
 
     @staticmethod
     def get_loss_type(loss_type):
-        if loss_type == 'KL':
+        if loss_type == 'simple':
+            return LossType.SIMPLE
+        elif loss_type == 'KL':
             return LossType.KL
         elif loss_type == 'KL_rescaled':
             return LossType.KL_RESCALED
-        elif loss_type == 'MSE':
-            return LossType.MSE
-        elif loss_type == 'MSE_rescaled':
-            return LossType.MSE_RESCALED
+        elif loss_type == 'hybrid':
+            return LossType.HYBRID
         else:
             raise NotImplementedError(loss_type)

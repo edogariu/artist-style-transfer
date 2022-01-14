@@ -24,7 +24,7 @@ STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
 DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
 
 BATCH_SIZE = 1
-NUM_SAMPLES = 10
+NUM_SAMPLES = 1
 DESIRED_LABELS = [445] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
 
 SHOW_PROGRESS = True
@@ -43,40 +43,31 @@ else:
 
 if STATE_DICT_FILENAME == 'models/64x64_diffusion.pt':
     CONDITIONAL = True
-    DIFF_ARGS = {'beta_schedule': 'cosine', 'sampling_var_type': 'learned_range', 'classifier': classifier,
+    DIFF_ARGS = {'beta_schedule': 'cosine', 'sampling_var_type': 'learned_interpolation', 'classifier': classifier,
                  'guidance_method': GUIDANCE if CONDITIONAL else None, 'guidance_strength': GUIDANCE_STRENGTH,
-                 'device': device}
+                 'loss_type': 'hybrid', 'device': device}
     MODEL_ARGS = {'resolution': 64, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 2, 3, 4),
                   'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 192,
                   'num_res_blocks': 3, 'split_qkv_first': True,
                   'resblock_updown': True, 'use_adaptive_gn': True, 'num_classes': 1000 if CONDITIONAL else None}
 elif STATE_DICT_FILENAME == 'models/128x128_diffusion.pt':
     CONDITIONAL = True
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned', 'classifier': classifier,
+    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_interpolation', 'classifier': classifier,
                  'guidance_method': GUIDANCE if CONDITIONAL else None, 'guidance_strength': GUIDANCE_STRENGTH,
-                 'device': device}
+                 'loss_type': 'hybrid', 'device': device}
     MODEL_ARGS = {'resolution': 128, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 1, 2, 3, 4),
                   'num_heads': 4, 'in_channels': 3, 'out_channels': 6, 'model_channels': 256,
                   'num_res_blocks': 2, 'split_qkv_first': False,
                   'resblock_updown': True, 'use_adaptive_gn': True, 'num_classes': 1000 if CONDITIONAL else None}
 elif STATE_DICT_FILENAME == 'models/256x256_diffusion_uncond.pt':
     CONDITIONAL = False
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_range', 'classifier': classifier,
+    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'learned_interpolation', 'classifier': classifier,
                  'guidance_method': GUIDANCE if CONDITIONAL else None, 'guidance_strength': GUIDANCE_STRENGTH,
-                 'device': device}
+                 'loss_type': 'hybrid', 'device': device}
     MODEL_ARGS = {'resolution': 256, 'attention_resolutions': (8, 16, 32), 'channel_mult': (1, 1, 2, 2, 4, 4),
                   'num_head_channels': 64, 'in_channels': 3, 'out_channels': 6, 'model_channels': 256,
                   'num_res_blocks': 2, 'split_qkv_first': False,
                   'resblock_updown': True, 'use_adaptive_gn': True, 'num_classes': 1000 if CONDITIONAL else None}
-elif STATE_DICT_FILENAME == 'cifar.pt':
-    CONDITIONAL = False
-    DIFF_ARGS = {'beta_schedule': 'linear', 'sampling_var_type': 'small', 'classifier': classifier,
-                 'guidance_method': GUIDANCE if CONDITIONAL else None, 'guidance_strength': GUIDANCE_STRENGTH,
-                 'device': device}
-    MODEL_ARGS = {'resolution': 32, 'attention_resolutions': (16,), 'channel_mult': (1, 2, 2, 2),
-                  'num_heads': 1, 'in_channels': 3, 'out_channels': 3, 'model_channels': 128,
-                  'num_res_blocks': 2, 'split_qkv_first': True,
-                  'resblock_updown': False, 'use_adaptive_gn': False, 'num_classes': 1000 if CONDITIONAL else None}
 else:
     raise NotImplementedError(STATE_DICT_FILENAME)
 
