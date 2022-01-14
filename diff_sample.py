@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -23,8 +24,8 @@ STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
 DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
 
 BATCH_SIZE = 1
-NUM_SAMPLES = 1
-DESIRED_LABELS = [566] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
+NUM_SAMPLES = 10
+DESIRED_LABELS = [445] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
 
 SHOW_PROGRESS = True
 UPSAMPLE = True  # Whether to 4x upsample generated image with Real-ESRGAN (https://github.com/xinntao/Real-ESRGAN)
@@ -113,10 +114,9 @@ for i_sample in range(NUM_SAMPLES):
     samples.append((data.cpu(), out.cpu()))
     print()
 
-
 # Show image (img must be RGB and from [0.0, 1.0] or [0, 255])
 def imshow(img, title=None):
-    plt.imshow(img)
+    plt.imshow(img.astype(np.uint8))
     if title is not None:
         plt.title(title)
     plt.pause(0.001)
@@ -125,18 +125,25 @@ def imshow(img, title=None):
 if UPSAMPLE:
     model.to(torch.device('cpu'))  # deallocate diffusion model memory
     del model
+    # avoid cuda alloc error on my 6GB GPU
+    if MODEL_ARGS['resolution'] > 64 and BATCH_SIZE > 1:
+        upsampling_device = torch.device('cpu')
+    else:
+        upsampling_device = torch.device('cuda')
     esrgan = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    esrgan.load_state_dict(torch.load('models/RealESRGAN_x4plus.pth')['params_ema'], strict=True)
-    esrgan.to(device).eval()
+    esrgan.load_state_dict(torch.load('models/RealESRGAN_x4plus.pth', map_location=upsampling_device)['params_ema'],
+                           strict=True)
+    esrgan.to(upsampling_device).eval()
 else:
     esrgan = None
+    upsampling_device = None
 
 print('Displaying {} generated images!'.format(NUM_SAMPLES * BATCH_SIZE))
 for sample in samples:
     data, out = sample
     if UPSAMPLE:
         data = F.interpolate(data, scale_factor=4, mode='bilinear', align_corners=False)
-        out = (out / 255.0).to(device)
+        out = (out / 255.0).to(upsampling_device)
         out = esrgan(out).cpu() * 255.0
         out = out.clamp(0, 255)
 
