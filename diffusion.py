@@ -378,6 +378,7 @@ class Diffusion:
     def variational_lower_bound(self, x_0, x_t, t, eps_pred, log_var):
         """
         Returns variational lower bound term in units of bits per dimension.
+        The true variational lower bound is the sum of these terms for all t.
         """
         # Get true mean and log_var of sampling distribution
         true_mean = extract(self.posterior_mean_coef_x0, t, x_0.shape) * x_0 + extract(
