@@ -17,15 +17,15 @@ device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 # device = torch.device('cpu')
 # torch.manual_seed(0)
 
-# STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
-STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
+STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
+# STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
 # STATE_DICT_FILENAME = 'models/256x256_diffusion_uncond.pt'
 
 DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
 
-BATCH_SIZE = 1
+BATCH_SIZE = 3
 NUM_SAMPLES = 1
-DESIRED_LABELS = [445] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
+DESIRED_LABELS = [49] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
 
 SHOW_PROGRESS = True
 UPSAMPLE = True  # Whether to 4x upsample generated image with Real-ESRGAN (https://github.com/xinntao/Real-ESRGAN)
@@ -105,6 +105,7 @@ for i_sample in range(NUM_SAMPLES):
     samples.append((data.cpu(), out.cpu()))
     print()
 
+
 # Show image (img must be RGB and from [0.0, 1.0] or [0, 255])
 def imshow(img, title=None):
     plt.imshow(img.astype(np.uint8))
@@ -117,7 +118,7 @@ if UPSAMPLE:
     model.to(torch.device('cpu'))  # deallocate diffusion model memory
     del model
     # avoid cuda alloc error on my 6GB GPU
-    if MODEL_ARGS['resolution'] > 64 and BATCH_SIZE > 1:
+    if (MODEL_ARGS['resolution'] > 64 and BATCH_SIZE > 1) or not torch.cuda.is_available():
         upsampling_device = torch.device('cpu')
     else:
         upsampling_device = torch.device('cuda')
