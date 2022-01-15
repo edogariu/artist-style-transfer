@@ -92,8 +92,8 @@ class Diffusion:
         # Rescale betas to match the number of rescaled diffusion steps with (eq. 19 in IDDPM)
         alphas = 1.0 - betas  # array of alpha_t for indices t
         alphas_cumprod = np.cumprod(alphas, axis=0)  # alphabar_t
-        rescaled_timesteps = list(range(-20 + original_num_steps // (2 * rescaled_num_steps),
-                                        -20 + original_num_steps + original_num_steps // (2 * rescaled_num_steps),
+        rescaled_timesteps = list(range(original_num_steps // (2 * rescaled_num_steps),
+                                        original_num_steps + original_num_steps // (2 * rescaled_num_steps),
                                         original_num_steps // rescaled_num_steps))
         last_alpha_cumprod = 1.0
         new_betas = []
@@ -105,8 +105,8 @@ class Diffusion:
         assert (betas > 0).all() and (betas <= 1).all(), 'betas in invalid range'
 
         self.betas = betas  # scheduled noise variance for each timestep
-        self.timestep_map = torch.tensor(rescaled_timesteps,
-                                         device=device, dtype=torch.long)  # map from rescaled to original timesteps
+        self.timestep_map = torch.tensor(rescaled_timesteps, device=self.device,
+                                         dtype=torch.long)  # map from rescaled to original timesteps
 
         # calculate and store various values to be used in diffusion, denoising, and ddim denoising
         # All these are arrays whose values at index t correspond to the comments next to them
@@ -124,9 +124,10 @@ class Diffusion:
         self.posterior_mean_coef_x0 = np.sqrt(alphas_cumprod_prev) * betas / (1.0 - alphas_cumprod)
         self.posterior_mean_coef_xt = sqrt_alphas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-        # Clip to remove variance at 0, since it will be strange
+        # Clip to remove variance at t=0, since it will be strange
         self.log_posterior_var_clipped = np.log(np.append(self.posterior_variance[1], self.posterior_variance[1:]))
 
+    @torch.no_grad()
     def diffuse(self, x_0, steps_to_do=None, noise=None):
         """
         Add noise to an input corresponding to a given number of steps in the diffusion Markov chain.
@@ -147,7 +148,9 @@ class Diffusion:
             x = self.diffusion_step(x_0, t=timestep, noise=noise)
         return x
 
-    def denoise(self, x=None, kwargs=None, start_step=None, steps_to_do=None, batch_size=1, progress=True):
+    @torch.no_grad()
+    def denoise(self, x=None, kwargs=None,
+                start_step=None, steps_to_do=None, batch_size=1, ema_params=None, progress=True):
         """
         Sample the posterior of the forward process in the diffusion Markov chain. If self.use_ddim is True, uses DDIM
         sampling instead of traditional DDPM sampling.
@@ -158,6 +161,7 @@ class Diffusion:
                 - start_step (int): which rescaled step to start at. should correspond to x's timestep
                 - steps_to_do (int): number of rescaled diffusion steps to apply forward
                 - batch_size (int): batch size of denoising process. only used if x is None
+                - ema_params (dict): dictionary of EMA parameters' data. if not None, use these for sampling
                 - progress (bool): whether to show tqdm progress bar
 
             Returns:
@@ -165,9 +169,19 @@ class Diffusion:
         """
         if kwargs is None:
             kwargs = {}
+
         assert ('y' in kwargs.keys() and kwargs['y'] is not None) == self.model.conditional, \
             'pass label iff model is class-conditional'
+        if self.model.conditional:
+            assert len(kwargs['y']) == batch_size, 'len(labels) != batch size'
         with torch.no_grad():
+            # Replace model parameters with ema parameters if desired
+            if ema_params is not None:
+                original_params = {}
+                for name, param in self.model.named_parameters():
+                    original_params[name] = param.data
+                    param.data = ema_params[name]
+
             # If no specified starting step, start from x = x_T
             if start_step is None:
                 start_step = self.rescaled_num_steps
@@ -198,14 +212,21 @@ class Diffusion:
                     x, x_0 = self.denoising_step(x, t=timestep, kwargs=kwargs)
                 else:  # DDIM SAMPLING
                     x, x_0 = self.ddim_denoising_step(x, t=timestep, kwargs=kwargs)
+
+            # Reset model back to non-ema parameters
+            if ema_params is not None:
+                for name, param in self.model.named_parameters():
+                    param.data = original_params[name]
         return x
 
     # -----------------------------------------------------------------------------------------------------------------
     # Calculations for each step
     # -----------------------------------------------------------------------------------------------------------------
 
-    # Samples from q(x_t | x_0), i.e. applies t steps of noise to x_0
     def diffusion_step(self, x_0, t, noise=None):
+        """
+        Samples from q(x_t | x_0), i.e. applies t steps of noise to x_0.
+        """
         if noise is None:
             noise = torch.randn_like(x_0).to(self.device)
         # (eq. 4 in DDPM paper)
@@ -236,9 +257,12 @@ class Diffusion:
             raise NotImplementedError(self.sampling_var_type)
         return eps_pred, log_var
 
-    # Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible x_{t-1}'s
-    # If return_x0, also returns the predicted initial image x_0
     def denoising_step(self, x_t, t, kwargs=None, clip_x=True):
+        """
+        Samples from p(x_{t-1} | x_t), i.e. use model to predict noise, then samples from corresponding possible
+        x_{t-1}'s.
+        If return_x0, also returns the predicted initial image x_0.
+        """
         eps_pred, log_var = self.get_eps_and_log_var(x_t, t, kwargs=kwargs)
 
         # If using classifier-free guidance, push eps_pred in the direction unique to its class and
@@ -284,8 +308,10 @@ class Diffusion:
 
         return sample, pred_x0
 
-    # Implement denoising diffusion implicit models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
     def ddim_denoising_step(self, x_t, t, kwargs=None, clip_x=True):
+        """
+        Implement denoising diffusion implicit models (DDIM): https://arxiv.org/pdf/2010.02502.pdf
+        """
         eps_pred = self.model(x_t, self.timestep_map[t.long()], **kwargs)
         if self.sampling_var_type == VarType.LEARNED or self.sampling_var_type == VarType.LEARNED_INTERPOLATION:
             eps_pred, _ = torch.split(eps_pred, int(eps_pred.shape[1] / 2), dim=1)
