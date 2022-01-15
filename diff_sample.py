@@ -15,7 +15,7 @@ from classifier import ArtistClassifier
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 # device = torch.device('cpu')
-# torch.manual_seed(0)
+torch.manual_seed(0)
 
 STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
 # STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
@@ -23,9 +23,9 @@ STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
 
 DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
 
-BATCH_SIZE = 3
+BATCH_SIZE = 1
 NUM_SAMPLES = 1
-DESIRED_LABELS = [49] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
+DESIRED_LABELS = [445] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
 
 SHOW_PROGRESS = True
 UPSAMPLE = True  # Whether to 4x upsample generated image with Real-ESRGAN (https://github.com/xinntao/Real-ESRGAN)
