@@ -84,7 +84,8 @@ class Diffusion:
         self.ddim_eta = ddim_eta
 
         if betas is None:
-            betas = get_beta_schedule(beta_schedule, original_num_steps, 0.0001, 0.02)
+            betas = get_beta_schedule(beta_schedule, original_num_steps,
+                                      0.0001 * 1000 / original_num_steps, 0.02 * 1000 / original_num_steps)
         else:
             assert len(betas) == original_num_steps, 'betas must be the right length!'
             betas = np.array(betas, dtype=np.float64)
@@ -144,7 +145,7 @@ class Diffusion:
             if steps_to_do is None or steps_to_do > self.rescaled_num_steps:
                 steps_to_do = self.rescaled_num_steps
 
-            timestep = (steps_to_do * torch.ones(x_0.shape[0])).to(self.device)
+            timestep = ((steps_to_do - 1) * torch.ones(x_0.shape[0])).to(self.device)
             x = self.diffusion_step(x_0, t=timestep, noise=noise)
         return x
 
@@ -180,7 +181,7 @@ class Diffusion:
                 original_params = {}
                 for name, param in self.model.named_parameters():
                     original_params[name] = param.data
-                    param.data = ema_params[name]
+                    param.data = ema_params[name].to(self.device)
 
             # If no specified starting step, start from x = x_T
             if start_step is None:
@@ -197,11 +198,11 @@ class Diffusion:
                     to(self.device)
 
             # Apply timestep rescaling
-            indices = list(range(start_step - steps_to_do, start_step))
+            indices = list(range(steps_to_do))
             # Add progress bar if needed
             if progress:
                 progress_bar = tqdm.tqdm
-                indices = progress_bar(reversed(indices), total=self.rescaled_num_steps)
+                indices = progress_bar(reversed(indices), total=steps_to_do)
             else:
                 indices = reversed(indices)
 
@@ -250,9 +251,9 @@ class Diffusion:
             frac = (log_var + 1) / 2
             log_var = frac * max_log + (1 - frac) * min_log
         elif self.sampling_var_type == VarType.LARGE:
-            log_var = np.log(np.append(self.posterior_variance[1], self.betas[1:]))
+            log_var = extract(np.log(np.append(self.posterior_variance[1], self.betas[1:])), t, x_t.shape)
         elif self.sampling_var_type == VarType.SMALL:
-            log_var = np.log(np.maximum(self.posterior_variance, 1e-20))
+            log_var = extract(np.log(np.maximum(self.posterior_variance, 1e-20)), t, x_t.shape)
         else:
             raise NotImplementedError(self.sampling_var_type)
         return eps_pred, log_var

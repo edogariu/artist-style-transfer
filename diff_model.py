@@ -335,8 +335,10 @@ class DiffusionModel(nn.Module):
         if num_classes is not None:
             self.class_embedding = nn.Embedding(num_classes, embedding_dim=step_embed_dim)
             self.conditional = True
+            self.num_classes = num_classes
         else:
             self.conditional = False
+            self.num_classes = None
 
         # Downsampling blocks
         self._feature_size = curr_channels = input_channels = int(model_channels * channel_mult[0])
