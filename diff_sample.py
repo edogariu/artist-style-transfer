@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,22 +14,25 @@ from classifier import ArtistClassifier
 # HYPERPARAMETERS
 # ---------------------------------------------------------------------------------------------------------------------
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+# torch.manual_seed(0)
 
-# device = torch.device('cpu')
-torch.manual_seed(0)
-
-STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
-# STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
+# STATE_DICT_FILENAME = 'models/64x64_diffusion.pt'
+STATE_DICT_FILENAME = 'models/128x128_diffusion.pt'
 # STATE_DICT_FILENAME = 'models/256x256_diffusion_uncond.pt'
 
-DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.0}
+DIFFUSION_ARGS = {'rescaled_num_steps': 25, 'original_num_steps': 1000, 'use_ddim': True, 'ddim_eta': 0.5}
 
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 NUM_SAMPLES = 1
-DESIRED_LABELS = [445] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
+DESIRED_LABELS = [7] * NUM_SAMPLES  # set to list of labels (one for each sample) or [] for random label each sample
+
+# Image and number of diffusion steps to apply to it to get a starting point for denoising.
+# STEPS_TO_DO is out of original_num_steps, regardless of whether we use rescaled or DDIM sampling
+# START_IMG, STEPS_TO_DO = cv2.imread('images/archive/images/images/Pablo_Picasso/Pablo_Picasso_12.jpg'), 440
+START_IMG, STEPS_TO_DO = None, None
 
 SHOW_PROGRESS = True
-UPSAMPLE = True  # Whether to 4x upsample generated image with Real-ESRGAN (https://github.com/xinntao/Real-ESRGAN)
+UPSAMPLE = False  # Whether to 4x upsample generated image with Real-ESRGAN (https://github.com/xinntao/Real-ESRGAN)
 
 GUIDANCE = None  # can be None, 'classifier', or 'classifier_free'
 GUIDANCE_STRENGTH = 1.0 if GUIDANCE is not None else None
@@ -83,11 +87,26 @@ samples = []
 DIFFUSION_ARGS.update(DIFF_ARGS)
 diffusion = Diffusion(model=model, **DIFFUSION_ARGS)
 
+if START_IMG is not None:
+    START_IMG = cv2.resize(START_IMG, dsize=(MODEL_ARGS['resolution'], MODEL_ARGS['resolution'])) / 127.5 - 1
+    START_IMG = torch.from_numpy(START_IMG).permute(2, 0, 1)[[2, 1, 0], :, :]
+    start_imgs = torch.zeros(size=(BATCH_SIZE, 3, MODEL_ARGS['resolution'], MODEL_ARGS['resolution']))
+    for i_batch in range(BATCH_SIZE):
+        temp = START_IMG.clone()
+        start_imgs[i_batch] = temp
+    START_IMG = start_imgs.to(device)
+
+
 if CONDITIONAL and len(DESIRED_LABELS) != 0:
     assert len(DESIRED_LABELS) == NUM_SAMPLES, 'please provide NUM_SAMPLES={} labels'.format(NUM_SAMPLES)
 for i_sample in range(NUM_SAMPLES):
     # CREATE RANDOM DATA
-    data = torch.randn([BATCH_SIZE, 3, MODEL_ARGS['resolution'], MODEL_ARGS['resolution']]).to(device)
+    if START_IMG is None:
+        data = torch.randn([BATCH_SIZE, 3, MODEL_ARGS['resolution'], MODEL_ARGS['resolution']]).to(device)
+        steps = DIFFUSION_ARGS['rescaled_num_steps']
+    else:
+        steps = STEPS_TO_DO * DIFFUSION_ARGS['rescaled_num_steps'] // DIFFUSION_ARGS['original_num_steps']
+        data = diffusion.diffuse(x_0=START_IMG, steps_to_do=steps)
     if CONDITIONAL:
         if len(DESIRED_LABELS) == 0:
             labels = torch.randint(low=0, high=1000, size=(BATCH_SIZE,), device=device)
@@ -98,11 +117,17 @@ for i_sample in range(NUM_SAMPLES):
 
     # RUN DIFFUSION
     print('Denoising sample {}! :)'.format(i_sample + 1))
-    out = diffusion.denoise(x=data, kwargs={'y': labels}, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS)
+    out = diffusion.denoise(x=data, kwargs={'y': labels}, batch_size=BATCH_SIZE, progress=SHOW_PROGRESS,
+                            steps_to_do=steps)
 
     # Convert from [-1.0, 1.0] to [0, 255]
     out = ((out + 1) * 127.5).clamp(0, 255)
-    samples.append((data.cpu(), out.cpu()))
+    data = ((data + 1) * 127.5).clamp(0, 255)
+    if START_IMG is not None:
+        START_IMG = ((START_IMG + 1) * 127.5).clamp(0, 255)
+        samples.append((START_IMG.cpu(), out.cpu()))
+    else:
+        samples.append((data.cpu(), out.cpu()))
     print()
 
 
@@ -114,6 +139,7 @@ def imshow(img, title=None):
     plt.pause(0.001)
 
 
+print('Displaying {} generated images!'.format(NUM_SAMPLES * BATCH_SIZE))
 if UPSAMPLE:
     model.to(torch.device('cpu'))  # deallocate diffusion model memory
     del model
@@ -126,19 +152,19 @@ if UPSAMPLE:
     esrgan.load_state_dict(torch.load('models/RealESRGAN_x4plus.pth', map_location=upsampling_device)['params_ema'],
                            strict=True)
     esrgan.to(upsampling_device).eval()
-else:
-    esrgan = None
-    upsampling_device = None
 
-print('Displaying {} generated images!'.format(NUM_SAMPLES * BATCH_SIZE))
-for sample in samples:
-    data, out = sample
-    if UPSAMPLE:
+    upscaled_samples = []
+    for sample in samples:
+        data, out = sample
         data = F.interpolate(data, scale_factor=4, mode='bilinear', align_corners=False)
         out = (out / 255.0).to(upsampling_device)
         out = esrgan(out).cpu() * 255.0
         out = out.clamp(0, 255)
+        upscaled_samples.append((data, out))
+    samples = upscaled_samples
 
+for sample in samples:
+    data, out = sample
     # Convert from NCHW-RGB to HWC-RGB
     data = data.permute(0, 2, 3, 1).detach().numpy()
     out = out.to(torch.uint8).permute(0, 2, 3, 1).detach().numpy()
