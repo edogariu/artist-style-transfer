@@ -1,6 +1,7 @@
 # Neural Style Transfer with Learned Artist Representation!
 
 Learning the style of a whole artist instead of simply the style of a specified image :)
+*Note: the code is not very clean or well-organized. I promise these days I write better code than this :)*
 
 ## How to set up:
   - Download /models/, /images/, and /dicts/ folders from https://drive.google.com/drive/folders/1O-GmpkyOs-x0I-Hg7zr8D6Vor1j6TAYr?usp=sharing, and place them in the repository folder.
