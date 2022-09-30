@@ -1,6 +1,7 @@
 # Neural Style Transfer with Learned Artist Representation!
 
 Learning the style of a whole artist instead of simply the style of a specified image :)
+
 *Note: the code is not very clean or well-organized. I promise these days I write better code than this :)*
 
 ## How to set up:
